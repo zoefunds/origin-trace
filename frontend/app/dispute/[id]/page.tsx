@@ -22,6 +22,32 @@ const PROVENANCE_OPTIONS = [
   { value: "PLATFORM_PUBLISH", label: "Platform-reported publish metadata" },
 ];
 
+// Real, stable, independently-fetchable artifacts for one-click testing —
+// deliberately two DIFFERENT provenance types and two genuinely different
+// eras, so a two-wallet test walks the earliest-wins ranking logic for
+// real rather than needing hand-typed URLs. Sample A pins to GitHub's own
+// canonical "first commit ever made through the API docs" example (2011,
+// deterministically parsed straight from the commit API's JSON — no LLM
+// involved in its timestamp at all). Sample B pins to a Wikipedia article
+// with a deep Wayback Machine history, deliberately later.
+const SAMPLE_CLAIMS = {
+  A: {
+    label: "Sample A — GitHub commit (2011, earlier)",
+    artifactUrl: "https://github.com/octocat/Hello-World/blob/master/README",
+    provenanceType: "GIT_COMMIT",
+    provenanceHintUrl: "https://api.github.com/repos/octocat/Hello-World/commits/7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
+  },
+  B: {
+    label: "Sample B — Wayback snapshot (later)",
+    artifactUrl: "https://en.wikipedia.org/wiki/Blockchain",
+    provenanceType: "WAYBACK",
+    provenanceHintUrl: "",
+  },
+};
+
+const SAMPLE_CHALLENGE_EVIDENCE_URL =
+  "https://archive.org/wayback/available?url=en.wikipedia.org/wiki/Blockchain&timestamp=20100101";
+
 function useContract() {
   const { address } = useWallet();
   return CONTRACT_ADDRESS ? new OriginTraceContract(CONTRACT_ADDRESS, address, RPC_URL) : null;
@@ -57,6 +83,16 @@ export default function DisputeDetailPage() {
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ["dispute", id] });
     queryClient.invalidateQueries({ queryKey: ["dispute-claims", id] });
+  }
+
+  function autofillClaim(sample: (typeof SAMPLE_CLAIMS)["A"]) {
+    setArtifactUrl(sample.artifactUrl);
+    setProvenanceType(sample.provenanceType);
+    setProvenanceHintUrl(sample.provenanceHintUrl);
+  }
+
+  function autofillChallengeEvidence(claimId: string) {
+    setChallengeUrlByClaim((prev) => ({ ...prev, [claimId]: SAMPLE_CHALLENGE_EVIDENCE_URL }));
   }
 
   async function withBusyState(key: string, fn: () => Promise<void>) {
@@ -174,6 +210,15 @@ export default function DisputeDetailPage() {
                   />
                   <Button
                     size="sm"
+                    variant="secondary"
+                    type="button"
+                    onClick={() => autofillChallengeEvidence(c.claim_id)}
+                    className="shrink-0 font-mono text-[10px]"
+                  >
+                    SAMPLE
+                  </Button>
+                  <Button
+                    size="sm"
                     disabled={busy === `challenge-${c.claim_id}` || !contract}
                     onClick={() =>
                       withBusyState(`challenge-${c.claim_id}`, async () => {
@@ -207,7 +252,34 @@ export default function DisputeDetailPage() {
 
       {canFileClaim && (
         <section className="space-y-3 rounded-md border border-border bg-card p-6">
-          <h2 className="font-mono text-sm uppercase tracking-wide text-muted-foreground">File Your Claim</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-mono text-sm uppercase tracking-wide text-muted-foreground">File Your Claim</h2>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => autofillClaim(SAMPLE_CLAIMS.A)}
+                className="font-mono text-[10px]"
+              >
+                AUTOFILL SAMPLE A
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => autofillClaim(SAMPLE_CLAIMS.B)}
+                className="font-mono text-[10px]"
+              >
+                AUTOFILL SAMPLE B
+              </Button>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Sample A and B are real, independently-fetchable artifacts (a GitHub commit and a
+            Wayback-archived page) from genuinely different eras — useful for testing the earliest
+            -wins ranking with two different wallets, one claim each.
+          </p>
           <div className="space-y-1.5">
             <Label>Pinned artifact URL (immutable once filed)</Label>
             <Input value={artifactUrl} onChange={(e) => setArtifactUrl(e.target.value)} placeholder="https://…" />

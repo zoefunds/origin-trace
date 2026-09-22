@@ -25,6 +25,18 @@ const CHALLENGE_WINDOW_OPTIONS = [
   { label: "3 days", seconds: 60 * 60 * 24 * 3 },
 ];
 
+const SAMPLE_DISPUTE = {
+  title: "Streaming Rollup Compression via Incremental Dictionaries",
+  description:
+    "A method for compressing rollup batch data using streaming dictionaries computed " +
+    "incrementally over the previous 24 hours of transactions, reducing L1 " +
+    "data-availability costs without a trusted setup. Covers the specific mechanism of " +
+    "rebuilding the dictionary window on every batch rather than a static, precomputed one.",
+  stakeGen: "0.01",
+  filingSeconds: FILING_WINDOW_OPTIONS[0].seconds, // 24h — short enough to test end-to-end quickly
+  challengeSeconds: CHALLENGE_WINDOW_OPTIONS[0].seconds, // 6h
+};
+
 export default function CreateDisputePage() {
   const router = useRouter();
   const { address, isConnected, isOnCorrectNetwork } = useWallet();
@@ -36,6 +48,14 @@ export default function CreateDisputePage() {
   const [challengeSeconds, setChallengeSeconds] = useState(CHALLENGE_WINDOW_OPTIONS[1].seconds);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  function autofillSample() {
+    setTitle(SAMPLE_DISPUTE.title);
+    setDescription(SAMPLE_DISPUTE.description);
+    setStakeGen(SAMPLE_DISPUTE.stakeGen);
+    setFilingSeconds(SAMPLE_DISPUTE.filingSeconds);
+    setChallengeSeconds(SAMPLE_DISPUTE.challengeSeconds);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -75,13 +95,24 @@ export default function CreateDisputePage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">File a Priority Dispute</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          This opens a filing window during which any number of claimants can each pin one
-          artifact and stake the required amount. Timing and substantive match are decided by
-          independent GenLayer validators once the window closes — never by you or the platform.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">File a Priority Dispute</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            This opens a filing window during which any number of claimants can each pin one
+            artifact and stake the required amount. Timing and substantive match are decided by
+            independent GenLayer validators once the window closes — never by you or the platform.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={autofillSample}
+          className="shrink-0 font-mono text-xs"
+        >
+          AUTOFILL SAMPLE
+        </Button>
       </div>
 
       {!isOnCorrectNetwork && isConnected && (
