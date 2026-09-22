@@ -182,18 +182,63 @@ points after AI review: `Witness-Weaver` (WitnessWeave contract) and
   `.env.example` placeholders are committed; the Reown project ID is a
   public client-side identifier and is fine to commit).
 
+## Live deployments (as of this session)
+
+The user explicitly asked to "do everything," including infra spend, so both
+sides were deployed for real:
+
+- **Backend**: `origin-trace-backend` on Fly.io, org `personal`, region
+  `iad`. Live at https://origin-trace-backend.fly.dev — verified with real
+  HTTP requests (`/healthz`, `/api/disputes`, `/api/disputes/_meta/budget`
+  all responding correctly against the real Postgres + real Upstash Redis).
+  `min_machines_running=1` / `auto_stop_machines=false` per fly.toml (never
+  scales to zero). Fly Postgres cluster `origin-trace-db` (unmanaged flex,
+  1 node, shared-cpu-1x, 1GB volume) attached via `fly postgres attach` —
+  `DATABASE_URL` was auto-set as a Fly secret by that command, not manually
+  typed. `REDIS_URL`/`GENLAYER_RPC_URL`/`CONTRACT_ADDRESS` set via
+  `fly secrets set`. **This costs real money on the user's Fly account
+  (personal org, owner priscillageorge83@gmail.com)** — a small Postgres
+  node plus one always-on shared-cpu-1x machine. If the project is
+  abandoned, tear both down with `fly apps destroy origin-trace-backend`
+  and `fly apps destroy origin-trace-db`.
+- **Frontend**: Vercel project `origin-trace` under scope
+  `adebiyi2002gmailcoms-projects`. Live at
+  https://origin-trace-wine.vercel.app — verified by loading it in a real
+  browser: design system renders correctly, wallet connect button opens the
+  Reown modal with WalletConnect/MetaMask/Trust Wallet/Binance/SafePal all
+  listed. Env vars set via `vercel env add ... production` (mirrors
+  `frontend/.env.local`); `NEXT_PUBLIC_CONTRACT_ADDRESS` is still empty
+  since the contract isn't deployed yet — update it with
+  `vercel env add NEXT_PUBLIC_CONTRACT_ADDRESS production` once the user
+  deploys the contract, then redeploy with `vercel deploy --prod`.
+- Found and fixed a real bug while verifying the backend locally before
+  deploying: `backend/src/index.ts`'s blanket `uncaughtException` handler
+  was swallowing `EADDRINUSE`-style listen failures, so a process that
+  failed to bind its port would sit there logging as if healthy while
+  serving nothing. Fixed by attaching an explicit `server.on("error", ...)`
+  handler that calls `process.exit(1)` on a startup bind failure, while
+  keeping the blanket handlers for genuine post-startup runtime errors (the
+  "log and survive" behavior the 24/7 requirement actually wants).
+- This sandbox's own outbound networking lacks IPv6 egress and its DNS
+  resolver didn't immediately reflect the newly-allocated shared IPv4 for
+  `origin-trace-backend.fly.dev` — `curl` from this environment needed
+  `--resolve host:443:<shared-ipv4>` to actually reach it. This is a
+  property of the tool sandbox, not the deployment; `fly status` and
+  `fly ssh console ... node -e "fetch(...)"` were used as the authoritative
+  health checks instead.
+
 ## Still not done
 
-- Live runtime verification of the backend against Postgres + the real
-  Upstash Redis (compiles clean, not yet run end-to-end).
-- Actual Fly.io deployment of the backend (config is ready; deploying
-  costs money and needs explicit user go-ahead on that specific spend).
-- Integration tests against a live GenVM runner.
+- Integration tests against a live GenVM runner (once the user deploys the
+  contract to StudioNet).
+- Wiring `NEXT_PUBLIC_CONTRACT_ADDRESS` / Fly's `CONTRACT_ADDRESS` once the
+  user provides the deployed contract address (see DEPLOY.md).
 - Settlements/history page, richer profile/withdrawal dashboard polish
   matching `settlements_challenge_vault.html` and
   `consensus_equivalence_inspector.html` reference designs more closely.
-- Deployment checklist/handoff document for the user's own StudioNet
-  contract deployment.
+- Restricting backend CORS to the actual frontend origin (currently
+  permissive `cors()` with no origin allowlist — fine for early development,
+  should be tightened before treating this as production-hardened).
 
 ## Reference material this build draws on
 
