@@ -121,6 +121,24 @@ export async function upsertClaim(c: ClaimRow): Promise<void> {
   );
 }
 
+export async function getStoredDispute(disputeId: string): Promise<DisputeRow | null> {
+  const res = await pool.query("SELECT * FROM disputes WHERE dispute_id = $1", [disputeId]);
+  return res.rows[0] ?? null;
+}
+
+const CLAIM_TERMINAL_STATUSES = ["WINNER", "LOSER", "REFUNDED"];
+
+/** claim_ids already stored whose status can never change again -- safe to
+ * skip re-fetching forever, this is the single biggest lever for staying
+ * under GenLayer's request budget once a protocol has any real activity. */
+export async function getTerminalClaimIds(disputeId: string): Promise<Set<string>> {
+  const res = await pool.query("SELECT claim_id FROM claims WHERE dispute_id = $1 AND status = ANY($2)", [
+    disputeId,
+    CLAIM_TERMINAL_STATUSES,
+  ]);
+  return new Set(res.rows.map((r) => r.claim_id as string));
+}
+
 export async function getKnownDisputeCount(): Promise<number> {
   const res = await pool.query("SELECT known_dispute_count FROM sync_state WHERE id = 1");
   return res.rows[0]?.known_dispute_count ?? 0;

@@ -8,7 +8,7 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
-  POLL_INTERVAL_MS = "60000"
+  POLL_INTERVAL_MS = "300000"   # 5 min -- see poller.ts for the change-detection that keeps this cheap
 
 [http_service]
   internal_port = 8080
