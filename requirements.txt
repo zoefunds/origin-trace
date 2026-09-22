@@ -1,0 +1,6 @@
+genvm-linter
+# Pinned to 0.29.2: the 0.30.0rc2 release candidate has a broken direct-mode
+# contract loader on this toolchain (calldata.DecodingError on import,
+# unrelated to any contract code). Requires Python 3.12+ (genlayer-py's
+# calldata module imports collections.abc.Buffer, added in 3.12).
+genlayer-test==0.29.2

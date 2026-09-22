@@ -1,0 +1,8 @@
+{
+  "name": "ORIGIN TRACE",
+  "short_name": "OriginTrace",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }],
+  "theme_color": "#090D14",
+  "background_color": "#090D14",
+  "display": "standalone"
+}

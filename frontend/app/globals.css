@@ -1,0 +1,200 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ORIGIN TRACE design tokens -- institutional cryptographic terminal.
+   Source: stitch_dark_theme_ui_design/DESIGN.md */
+:root {
+  --font-body: "Inter";
+  --font-display: "Inter";
+  --font-mono: "JetBrains Mono";
+
+  --background: #090d14;
+  --foreground: #dfe2ed;
+
+  --surface-01: #0d131f;
+  --surface-02: #131b2b;
+  --surface-03: #1b263b;
+  --boundary: #23334e;
+  --boundary-strong: #2e4166;
+
+  --card: #0d131f;
+  --card-foreground: #dfe2ed;
+  --popover: #131b2b;
+  --popover-foreground: #dfe2ed;
+
+  /* Primary Verification -- cryptographic truth, finalized state */
+  --primary: #00f0ff;
+  --primary-foreground: #090d14;
+  /* Secondary Proof -- consensus/stake accents */
+  --secondary: #00d2b4;
+  --secondary-foreground: #090d14;
+  --muted: #131b2b;
+  --muted-foreground: #849495;
+  --accent: #00f0ff;
+  --accent-foreground: #090d14;
+
+  /* Dispute & Timer Amber -- challenge windows, countdowns only */
+  --amber: #ffb020;
+  --inconclusive: #475569;
+  --inconclusive-foreground: #94a3b8;
+
+  --destructive: #ffb4ab;
+  --destructive-foreground: #690005;
+
+  --border: var(--boundary);
+  --input: #0a0e15;
+  --ring: #00f0ff;
+
+  --radius: 0.25rem;
+
+  --sidebar: #090d14;
+  --sidebar-foreground: #dfe2ed;
+  --sidebar-primary: #00f0ff;
+  --sidebar-primary-foreground: #090d14;
+  --sidebar-accent: #131b2b;
+  --sidebar-accent-foreground: #dfe2ed;
+  --sidebar-border: #23334e;
+  --sidebar-ring: #00f0ff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: 0.75rem;
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply text-foreground;
+    font-family: var(--font-body), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display), var(--font-body), sans-serif;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  code, .font-mono, .mono-data {
+    font-family: var(--font-mono), monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .terminal-glow {
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.15);
+  }
+
+  /* Lifecycle badges -- squared corners only, never pill-shaped, per DESIGN.md */
+  .badge-lifecycle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 2px 8px;
+    border-radius: 2px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-width: 1px;
+    border-style: solid;
+  }
+
+  .badge-filing-open {
+    border-color: var(--amber);
+    background: rgba(255, 176, 32, 0.08);
+    color: var(--amber);
+  }
+
+  .badge-validating {
+    border-color: var(--secondary);
+    background: rgba(0, 210, 180, 0.08);
+    color: var(--secondary);
+  }
+
+  .badge-ranked,
+  .badge-challenge-window {
+    border-color: var(--amber);
+    background: rgba(255, 176, 32, 0.15);
+    color: var(--amber);
+  }
+
+  .badge-finalized {
+    border-color: var(--primary);
+    background: rgba(0, 240, 255, 0.1);
+    color: var(--primary);
+  }
+
+  .badge-inconclusive,
+  .badge-cancelled,
+  .badge-timed-out {
+    border-color: var(--inconclusive);
+    background: rgba(71, 85, 105, 0.1);
+    color: var(--inconclusive-foreground);
+  }
+}
+
+html {
+  min-height: 100vh !important;
+  height: 100%;
+  scroll-behavior: smooth;
+  background-color: #090d14 !important;
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh !important;
+  overscroll-behavior: none;
+}
+
+/* Reown AppKit modal theming to match the terminal aesthetic */
+w3m-legal-footer,
+[data-testid="w3m-legal-footer"] {
+  display: none !important;
+}
+
+w3m-modal,
+w3m-modal * {
+  --w3m-border-radius-master: 2px !important;
+}
