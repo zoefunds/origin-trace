@@ -1,33 +1,24 @@
 # ORIGIN TRACE — Project Memory
 
-This file is the persistent source of truth for this project across sessions.
-Read it first before making architectural decisions. Update it whenever a
-decision changes.
-
-## Deployed contract address
-
-`0xda68997ac7D581aa0C280e0547cCf5375935c710` — deployed by the user to
-GenLayer StudioNet. Wired into both live services:
-- Fly secret `CONTRACT_ADDRESS` on `origin-trace-backend` (confirmed via
-  `fly logs`: poller now reaches the real contract, `get_contract_info()`
-  succeeds, `0 total disputes` since none have been created yet).
-- Vercel env var `NEXT_PUBLIC_CONTRACT_ADDRESS` on the `origin-trace`
-  project, production environment (redeployed after setting it).
-- Local `backend/.env` and `frontend/.env.local` (gitignored, not
-  committed — this is why there was nothing to `git commit` after wiring
-  the address in; only the live secrets stores and local env files changed).
+Persistent source of truth for this project across sessions. Read this
+first before making architectural decisions. Update it whenever a decision
+or the live state changes — this file describes **current reality**, not a
+session-by-session diary; stale entries get corrected in place, not left
+alongside their replacement.
 
 ## What this project is
 
-ORIGIN TRACE is an onchain priority-dispute resolution protocol. Two or more
-parties each stake GEN claiming they made a specific idea/design/work first.
-Each claim pins one artifact URL at filing time (immutable after). GenLayer
-validators independently fetch every claimant's artifact + a third-party
-provenance source for it (never the claimant's self-reported date), and a
-deterministic function ranks claims and pays out from the resulting
-structured (timestamp, match_score) data. Full spec: see the original master
-prompt (richtext_converted_to_markdown (2).md) and JUDGE.md (the review
-rubric this project is being built to score 5/5 against).
+ORIGIN TRACE is an onchain priority-dispute resolution protocol on
+GenLayer. Two or more parties each stake GEN claiming they made a specific
+idea/design/work first. Each claim pins one artifact URL at filing time,
+immutable afterward. GenLayer validators independently fetch every
+claimant's artifact plus a third-party provenance source for it (never the
+claimant's self-reported date), and a fully separate deterministic function
+ranks claims and pays out from the resulting structured
+`(timestamp, match_score)` data. Full product spec: the original master
+prompt (`richtext_converted_to_markdown (2).md`) and the review rubric this
+was built to score 5/5 against (`JUDGE.md`), both under
+`/Users/macbook/Downloads/`.
 
 ## Repository location
 
@@ -35,57 +26,80 @@ rubric this project is being built to score 5/5 against).
 `/Users/macbook/review` — that directory holds an unrelated pre-existing
 project (`proof-of-work`) that must not be touched or confused with this one.
 
+## Current live state
+
+| Piece | Value |
+|---|---|
+| Contract address | `0xda68997ac7D581aa0C280e0547cCf5375935c710` (GenLayer StudioNet, deployed by the user) |
+| Backend | https://origin-trace-backend.fly.dev (Fly.io app `origin-trace-backend`, region `iad`, org `personal`) |
+| Backend DB | Fly Postgres cluster `origin-trace-db`, attached via `fly postgres attach` (`DATABASE_URL` auto-set as a Fly secret) |
+| Backend cache | Upstash Redis, set via `fly secrets set REDIS_URL=...` |
+| Frontend | https://origin-trace-wine.vercel.app (Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects`) |
+| GitHub repo | https://github.com/zoefunds/origin-trace (pushed as user `zoefunds`, no bot attribution) |
+
+Both live services are confirmed wired to the real contract: `fly logs -a
+origin-trace-backend` shows the poller successfully calling
+`get_contract_info()` and cycling cleanly; the frontend renders correctly
+in a real browser with the Reown wallet modal opening properly. See
+`DEPLOY.md` for the full redeploy/verification/teardown reference.
+
+Real secrets (`REDIS_URL`, `DATABASE_URL`, live `CONTRACT_ADDRESS` values)
+live only in `backend/.env` / `frontend/.env.local` (both gitignored) and
+in Fly/Vercel's own secret stores — never in git. `.env.example` files hold
+placeholders only, except the Reown project ID (`d3d589c09ef32b5b3273da42abb75d5e`),
+which is a public client-side identifier baked into every WalletConnect
+request and is fine to commit.
+
 ## Locked architecture decisions
 
-- **Backend datastore**: self-hosted PostgreSQL via Docker.
-- **Backend hosting**: Fly.io (24/7 always-on, auto-restart — "must never
-  die" requirement). Fly CLI already installed on this machine.
+- **Backend datastore**: PostgreSQL (Fly Postgres in production, native/
+  Docker locally).
+- **Backend hosting**: Fly.io, 24/7 always-on (`min_machines_running=1`,
+  `auto_stop_machines=false` — the "must never die" requirement).
 - **Auth**: wallet-based (SIWE-style message signing via MetaMask/Rainbow/
-  Zerion). No custodied private keys, no email/password option chosen.
-- **Filing window**: 48h default (`DEFAULT_FILING_WINDOW_SECONDS`).
+  Zerion/WalletConnect through Reown AppKit). No custodied private keys, no
+  email/password option.
+- **Filing window**: 48h default (`DEFAULT_FILING_WINDOW_SECONDS`), bounded
+  `[15min, 30 days]`.
 - **Timestamp tolerance for INCONCLUSIVE**: 24h
   (`TIMESTAMP_TOLERANCE_SECONDS`).
 - **Challenge window**: 24h fixed default
-  (`DEFAULT_CHALLENGE_WINDOW_SECONDS`), but actually configurable per-dispute
-  at `create_dispute()` time within `[2h, 14d]` bounds.
-- **Provenance scope at launch**: generic — WAYBACK (web archive), GIT_COMMIT
-  (GitHub/GitLab commit API), PLATFORM_PUBLISH (LLM-extracted platform
-  metadata) all supported from day one, not narrowed to one type.
-- **Contract deployment boundary**: I (the agent) write, lint, and test the
-  contract. The user deploys it themselves to GenLayer Studio/StudioNet and
-  provides the resulting `DEPLOYED_CONTRACT_ADDRESS` back. The agent never
-  deploys or holds a contract address.
+  (`DEFAULT_CHALLENGE_WINDOW_SECONDS`), configurable per-dispute at
+  `create_dispute()` time within `[2h, 14 days]`.
+- **Provenance scope**: generic from day one — `WAYBACK` (web archive),
+  `GIT_COMMIT` (GitHub/GitLab commit API), `PLATFORM_PUBLISH` (LLM-extracted
+  platform metadata) all supported, not narrowed to one type.
+- **Contract deployment boundary**: the agent writes, lints, and tests the
+  contract; the user deploys it and provides the address back. The agent
+  never deploys or holds a contract address itself.
 - **Frontend design system**: dark cryptographic-terminal aesthetic from
-  `/Users/macbook/Documents/stitch_dark_theme_ui_design/DESIGN.md` — obsidian
-  surfaces (#090D14/#0D131F/#131B2B/#1B263B), cyan primary (#00F0FF), teal
-  secondary (#00D2B4), amber for challenge/timer states (#FFB020), Inter for
-  prose, JetBrains Mono for all hashes/timestamps/addresses/stake amounts.
-  Non-pill badges only (2-4px radius) for lifecycle states: FILING_OPEN,
-  VALIDATING, CHALLENGE_WINDOW, FINALIZED, INCONCLUSIVE.
+  `/Users/macbook/Documents/stitch_dark_theme_ui_design/DESIGN.md` —
+  obsidian surfaces (`#090D14`/`#0D131F`/`#131B2B`/`#1B263B`), cyan primary
+  (`#00F0FF`), teal secondary (`#00D2B4`), amber for challenge/timer states
+  (`#FFB020`), Inter for prose, JetBrains Mono for hashes/timestamps/
+  addresses/stake amounts. Non-pill badges only (2–4px radius) for
+  lifecycle states.
 
-## Contract status (as of this session)
+## Contract
 
-File: `/Users/macbook/origin/contracts/origin_trace.py` — **1482 lines**.
+`contracts/origin_trace.py` — 1482 lines. `genvm-lint check` passes clean
+(0 errors; 1 informational warning about a newer runner being available —
+intentionally still pinned to
+`py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` to match
+the exact runner used by the reference projects below). Schema extraction
+succeeds (14 methods, 0 ctor params). **19/19 direct-mode tests pass**
+(`tests/direct/test_origin_trace_lifecycle.py`) — see the README's
+"Contract" section for what's covered.
 
-- `genvm-lint check` passes clean (0 errors, 1 informational warning about a
-  newer runner being available — intentionally still pinned to
-  `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` to match
-  the exact runner used by the two reference projects this was modeled on).
-- Schema extraction succeeds (14 methods, 0 ctor params) — rules out the
-  "could not load contract schema" failure mode the user explicitly flagged.
-- **19/19 direct-mode tests pass** (`tests/direct/test_origin_trace_lifecycle.py`).
-  Covers: full winner lifecycle, near-tie → INCONCLUSIVE, unverifiable
-  provenance → INCONCLUSIVE, adversarial in-page date-forgery resistance,
-  non-matching-but-earliest claim ineligibility, access control (cancel,
-  withdraw, challenge-evidence-own-claim-only), single-filer refund,
-  full-timeout refund, challenge-window timing enforcement, and the
-  deterministic GIT_COMMIT timestamp parse path.
+### Architecture lineage
 
-### Architecture modeled on two prior GenLayer projects that scored 560/480
-points after AI review: `Witness-Weaver` (WitnessWeave contract) and
-`witnessmark`. Key patterns reused directly:
-- Single `_send_gen` escrow choke point; zero-ledger-then-transfer ordering
-  everywhere money moves (reentrancy-safe by construction).
+Modeled directly on two prior GenLayer contracts that scored 560/480 points
+after AI review: `Witness-Weaver` (`WitnessWeave` contract, at
+`/Users/macbook/Witness-Weaver/contracts/witnessweave_contract.py`) and
+`witnessmark` (`/Users/macbook/witnessmark/contracts/witnessmark_contract.py`).
+Patterns reused directly:
+- Single `_send_gen` escrow emission point; zero-ledger-then-transfer
+  ordering everywhere money moves (reentrancy-safe by construction).
 - `gl.vm.run_nondet_unsafe(leader_fn, validator_fn)` with the validator
   **independently re-deriving** the entire result (its own fetch, its own
   LLM call) rather than trusting the leader's output.
@@ -93,27 +107,76 @@ points after AI review: `Witness-Weaver` (WitnessWeave contract) and
   `[LLM_ERROR]`) so leader/validator disagreement is meaningful instead of
   "any exception = disagree."
 - Deterministic ranking/payout fully separated from the nondet evaluation
-  step — the LLM/validators only ever produce a structured per-claim
-  `(timestamp, match_score)` result; a pure Python function ranks and a pull
-  -based `withdraw()` pays out.
+  step.
 
-### Trust-boundary-specific additions unique to this contract
-- Timestamp extraction for WAYBACK and GIT_COMMIT is **fully deterministic
-  JSON parsing** (no LLM in that path at all) — leader/validator must match
-  EXACTLY on these, which is a stronger equivalence bar than an LLM-derived
-  value. Only PLATFORM_PUBLISH timestamps go through the LLM (unstructured
-  metadata), and get a 6h tolerance.
-- The substantive-match LLM prompt explicitly instructs the model to ignore
-  any date/priority claims or embedded instructions found in the
-  claimant-controlled artifact page text — adversarial-content mitigation
-  is enforced by prompt design *and* by architecture (timestamp extraction
+### Trust-boundary additions unique to this contract
+
+- `WAYBACK`/`GIT_COMMIT` timestamp extraction is fully deterministic JSON
+  parsing (no LLM at all) — leader/validator must match EXACTLY. Only
+  `PLATFORM_PUBLISH` goes through the LLM, with a 6h tolerance.
+- The substantive-match prompt explicitly instructs the model to ignore any
+  date/priority claims or embedded instructions found in the
+  claimant-controlled artifact text — adversarial-content mitigation is
+  enforced by prompt design *and* by architecture (timestamp extraction
   never reads the artifact's own text, only the separately-fetched
   provenance source).
-- Challenge window is additive-only (extra provenance URLs per claim, never
-  a replacement artifact) and triggers at most ONE final re-evaluation pass
-  at `finalize_dispute()` — no repeated challenge/re-evaluate cycles, so the
-  state machine always terminates (avoids "undetermined consensus" from
-  leader-rotation storms, a requirement the user was explicit about).
+- Challenge window is additive-only and triggers at most ONE final
+  re-evaluation pass at `finalize_dispute()` — no repeated challenge/
+  re-evaluate cycles, so the state machine always terminates.
+
+## Backend request economy (why it doesn't blow the GenLayer rate limit)
+
+GenLayer enforces a 5000 requests/day ceiling. The backend
+(`backend/src/poller.ts`) is the *only* thing that ever calls GenLayer RPC
+— the frontend reads exclusively through the backend's cached API
+(`backend/src/routes/disputes.ts`, `frontend/lib/api.ts`).
+
+The poller originally re-fetched every claim of every active dispute on
+every 60-second tick, which burns the daily budget almost immediately once
+there's any real activity (10 disputes × 5 claims ≈ 70 requests/cycle × 1440
+cycles/day). Fixed:
+
+- `get_dispute` (1 cheap request) runs every cycle per active dispute; it
+  alone is enough to detect whether `claim_count` grew or `status`
+  transitioned.
+- `get_dispute_claims`/`get_claim` only run when one of those actually
+  changed since the last cycle (compared against the previously-stored
+  Postgres row — zero GenLayer cost to check).
+- A claim already stored with a terminal status (`WINNER`/`LOSER`/
+  `REFUNDED`) is never re-fetched again — that status is set exactly once
+  by `finalize_dispute` and can never change afterward.
+- Default poll interval widened from 60s to 5 minutes
+  (`POLL_INTERVAL_MS=300000` in `backend/fly.toml`).
+- A Redis-backed daily counter (`backend/src/redis.ts`,
+  `tryReserveGenlayerRequest`) hard-caps usage at ~4000/day and the poller
+  skips a whole cycle rather than risk exhausting it.
+
+Net effect: an idle/quiet protocol costs ~1 request per 5-minute cycle
+regardless of historical dispute count; an active one only pays for claims
+when they've genuinely changed.
+
+## Frontend
+
+Next.js 16 (Turbopack) + wagmi + Reown AppKit (project ID
+`d3d589c09ef32b5b3273da42abb75d5e`) + genlayer-js. `npm run build` passes
+clean; all 5 routes compile/prerender (`/`, `/create`, `/dispute/[id]`,
+`/profile`, `/_not-found`).
+
+Pages: landing/live dispute feed, create-dispute form, dispute detail (file
+claim, trigger evaluation, submit challenge evidence, finalize, withdraw),
+profile (wallet-scoped disputes/claims). Both the create-dispute and
+file-claim forms have one-click "AUTOFILL SAMPLE" buttons using real,
+independently-fetchable test data (a 2011 GitHub commit for `GIT_COMMIT`
+provenance, a Wikipedia page for `WAYBACK` provenance) so testing the
+earliest-wins ranking logic doesn't require hand-typing URLs.
+
+**Known gap, called out in code comments in `lib/contracts/OriginTrace.ts`**:
+writes sign through `window.ethereum` (works for MetaMask and any other
+injected-provider wallet, which is what Reown also uses for its "injected"
+connector). A WalletConnect-only remote session with zero injected provider
+in that browser needs genlayer-js's viem/WalletConnect signer bridging
+verified against the current SDK reference before it's claimed to work —
+not yet done.
 
 ## Known environment gotchas on this machine (macOS, pyenv-managed)
 
@@ -129,167 +192,87 @@ points after AI review: `Witness-Weaver` (WitnessWeave contract) and
 - `gltest`'s `VMContext` in direct mode does **not** simulate the actual
   native-GEN transfer triggered by `@gl.evm.contract_interface` /
   `emit_transfer()` — it logs an unhandled `EthSend` and no-ops. Direct
-  tests can and do prove the escrow ledger zeroes correctly and the
-  withdraw path executes without reverting, but the actual GEN balance
-  change can only be verified with integration tests against a real
-  Studio/GLSim runner (not yet run in this session).
-- `VMContext` has `warp(iso_timestamp_string)` (absolute), not a relative
-  `warp_seconds()` — see `warp_forward()` helper in `tests/direct/conftest.py`.
+  tests prove the escrow ledger zeroes correctly and the withdraw path
+  executes without reverting; the actual GEN balance change has only been
+  verified indirectly, by confirming the live backend reaches the real
+  deployed contract — a full integration test against a live GenVM runner
+  has not been run.
+- `VMContext.warp()` takes an absolute ISO timestamp, not a relative
+  duration — see `warp_forward()` helper in `tests/direct/conftest.py`.
 - `VMContext` balances are a private `_balances` dict with no public
-  getter — see `get_balance()` helper in the same conftest (only used for
-  documentation purposes now since direct mode can't credit transfers
-  anyway; kept for future integration-test reuse).
+  getter — see `get_balance()` helper in the same conftest (kept for future
+  integration-test reuse).
 - Reown AppKit's `@reown/appkit-adapter-wagmi` requires `viem@>=2.55.13` as
-  a peer, but genlayer-js's own examples pin `viem@2.21.54` — bumped to
-  `^2.37.0` in `frontend/package.json` to satisfy both; re-check this pin
-  if genlayer-js starts requiring an exact older viem version.
+  a peer; bumped `frontend/package.json` to `viem@^2.37.0` to satisfy both
+  it and genlayer-js. Re-check this pin if genlayer-js starts requiring an
+  exact older viem version.
 - `@wagmi/connectors`' Base Account (Coinbase Smart Wallet) connector pulls
   in `@coinbase/cdp-sdk`, which dynamically imports optional `@x402/*`
-  packages this project never installs. Next.js (both Turbopack and
-  webpack) tries to statically resolve these at build time and fails.
+  packages this project never installs, breaking the Next.js build.
   Fixed by aliasing `@base-org/account` to
   `frontend/lib/stubs/empty-module.js` in `next.config.ts` (both
   `turbopack.resolveAlias` and `webpack.resolve.alias` — Turbopack requires
-  a relative path string like `"./lib/stubs/..."`, not an absolute path or
-  `false`). This app never registers the Coinbase connector, so the stub is
-  never actually invoked at runtime.
+  a relative path string, not an absolute path or `false`). This app never
+  registers the Coinbase connector, so the stub is never actually invoked.
 - Reown AppKit's `createAppKit(...)` call must run at **module scope** in
   `frontend/lib/genlayer/appkit.ts`, not inside a `useEffect` — the
-  `useAppKit`/`useAccount` hooks need a modal instance to already exist
-  during Next.js's static-generation pass too, and `createAppKit` is itself
+  `useAppKit`/`useAccount` hooks need a modal instance to exist during
+  Next.js's static-generation pass too, and `createAppKit` is itself
   SSR-safe.
+- `backend/src/index.ts`'s blanket `uncaughtException` handler originally
+  swallowed HTTP listen failures (e.g. `EADDRINUSE`), letting the process
+  linger as if healthy while serving nothing. Fixed with an explicit
+  `server.on("error", ...)` handler that exits on a startup bind failure,
+  while keeping the blanket handlers for genuine post-startup runtime
+  errors (the "log and survive" behavior the 24/7 requirement wants).
+- This sandbox's own outbound networking lacks IPv6 egress, and its DNS
+  resolver didn't immediately reflect Fly's newly-allocated shared IPv4 —
+  `curl` needed `--resolve host:443:<shared-ipv4>` to reach the backend
+  from this environment. That's a property of the tool sandbox, not the
+  deployment; `fly status` / `fly ssh console ... node -e "fetch(...)"`
+  are the authoritative health checks when this comes up again.
 - A native Postgres was already running on this machine's port 5432 (and a
-  stale Docker proxy ended up squatting 5433 too after one failed compose
-  attempt) — `backend/docker-compose.yml` maps host `5433:5432`; if that
-  port is also unavailable, either free it or remap again before running
-  `docker compose up -d postgres` locally.
-
-## Backend/frontend status (this session)
-
-- **Backend** (`backend/`): Express + Postgres + ioredis, `npm run build`
-  (tsc) passes clean. Not yet verified against a live Postgres/Redis in
-  this session (local Docker port conflict — see above); the code compiles
-  and the logic (poller, rate-limit-guarded GenLayer reads, cached API
-  routes) has not been runtime-tested end-to-end yet. `fly.toml` written
-  (`min_machines_running=1`, `auto_stop_machines=false`) but **not
-  deployed** — deploying costs money and wasn't done without the user
-  explicitly confirming that specific spend.
-- **Frontend** (`frontend/`): Next.js 16 + wagmi + Reown AppKit (project ID
-  `d3d589c09ef32b5b3273da42abb75d5e`, covers MetaMask/Rainbow/Zerion/any
-  WalletConnect wallet through one connect flow) + genlayer-js.
-  `npm run build` passes clean (all 5 routes compile/prerender: `/`,
-  `/create`, `/dispute/[id]`, `/profile`). Pages built: landing/dispute
-  feed, create-dispute form, dispute detail (file claim, trigger
-  evaluation, submit challenge evidence, finalize, withdraw), profile
-  (my disputes/claims). Reads go through the backend's cached API
-  (`lib/api.ts`) to protect the GenLayer daily request budget; writes go
-  directly through the connected wallet via `lib/contracts/OriginTrace.ts`.
-- **Known gap, called out in code comments**: `OriginTrace.ts` signs writes
-  through `window.ethereum` (works for MetaMask/injected wallets, which is
-  what Reown also uses for its "injected" connector). A WalletConnect-only
-  remote session with zero injected provider in that browser needs
-  genlayer-js's viem/WalletConnect signer bridging verified against the
-  current SDK reference before it's claimed to work — not yet done.
-- **Repository**: pushed to `github.com/zoefunds/origin-trace` (real
-  secrets in `backend/.env`/`frontend/.env.local` are gitignored — only
-  `.env.example` placeholders are committed; the Reown project ID is a
-  public client-side identifier and is fine to commit).
-
-## Live deployments (as of this session)
-
-The user explicitly asked to "do everything," including infra spend, so both
-sides were deployed for real:
-
-- **Backend**: `origin-trace-backend` on Fly.io, org `personal`, region
-  `iad`. Live at https://origin-trace-backend.fly.dev — verified with real
-  HTTP requests (`/healthz`, `/api/disputes`, `/api/disputes/_meta/budget`
-  all responding correctly against the real Postgres + real Upstash Redis).
-  `min_machines_running=1` / `auto_stop_machines=false` per fly.toml (never
-  scales to zero). Fly Postgres cluster `origin-trace-db` (unmanaged flex,
-  1 node, shared-cpu-1x, 1GB volume) attached via `fly postgres attach` —
-  `DATABASE_URL` was auto-set as a Fly secret by that command, not manually
-  typed. `REDIS_URL`/`GENLAYER_RPC_URL`/`CONTRACT_ADDRESS` set via
-  `fly secrets set`. **This costs real money on the user's Fly account
-  (personal org, owner priscillageorge83@gmail.com)** — a small Postgres
-  node plus one always-on shared-cpu-1x machine. If the project is
-  abandoned, tear both down with `fly apps destroy origin-trace-backend`
-  and `fly apps destroy origin-trace-db`.
-- **Frontend**: Vercel project `origin-trace` under scope
-  `adebiyi2002gmailcoms-projects`. Live at
-  https://origin-trace-wine.vercel.app — verified by loading it in a real
-  browser: design system renders correctly, wallet connect button opens the
-  Reown modal with WalletConnect/MetaMask/Trust Wallet/Binance/SafePal all
-  listed. Env vars set via `vercel env add ... production` (mirrors
-  `frontend/.env.local`); `NEXT_PUBLIC_CONTRACT_ADDRESS` is still empty
-  since the contract isn't deployed yet — update it with
-  `vercel env add NEXT_PUBLIC_CONTRACT_ADDRESS production` once the user
-  deploys the contract, then redeploy with `vercel deploy --prod`.
-- Found and fixed a real bug while verifying the backend locally before
-  deploying: `backend/src/index.ts`'s blanket `uncaughtException` handler
-  was swallowing `EADDRINUSE`-style listen failures, so a process that
-  failed to bind its port would sit there logging as if healthy while
-  serving nothing. Fixed by attaching an explicit `server.on("error", ...)`
-  handler that calls `process.exit(1)` on a startup bind failure, while
-  keeping the blanket handlers for genuine post-startup runtime errors (the
-  "log and survive" behavior the 24/7 requirement actually wants).
-- This sandbox's own outbound networking lacks IPv6 egress and its DNS
-  resolver didn't immediately reflect the newly-allocated shared IPv4 for
-  `origin-trace-backend.fly.dev` — `curl` from this environment needed
-  `--resolve host:443:<shared-ipv4>` to actually reach it. This is a
-  property of the tool sandbox, not the deployment; `fly status` and
-  `fly ssh console ... node -e "fetch(...)"` were used as the authoritative
-  health checks instead.
-
-## Still not done
-
-- Integration tests against a live GenVM runner (once the user deploys the
-  contract to StudioNet).
-- Wiring `NEXT_PUBLIC_CONTRACT_ADDRESS` / Fly's `CONTRACT_ADDRESS` once the
-  user provides the deployed contract address (see DEPLOY.md).
-- Settlements/history page, richer profile/withdrawal dashboard polish
-  matching `settlements_challenge_vault.html` and
-  `consensus_equivalence_inspector.html` reference designs more closely.
-- Restricting backend CORS to the actual frontend origin (currently
-  permissive `cors()` with no origin allowlist — fine for early development,
-  should be tightened before treating this as production-hardened).
+  stale Docker proxy squatted 5433 after one failed compose attempt) — for
+  local dev, `backend/docker-compose.yml` maps host `5433:5432`, but this
+  session ended up using the native Postgres directly (created an
+  `origin_trace` DB/role on it) since Docker's daemon wasn't running.
+  Either path works; check `lsof -nP -iTCP:5432/5433 -sTCP:LISTEN` first.
 
 ## Reference material this build draws on
 
-- `/Users/macbook/Downloads/richtext_converted_to_markdown (2).md` — the
-  full master prompt / product spec (non-negotiable working rules, trust
+- `/Users/macbook/Downloads/richtext_converted_to_markdown (2).md` — full
+  master prompt / product spec (non-negotiable working rules, trust
   boundary requirements, final quality bar).
 - `/Users/macbook/Downloads/JUDGE.md` — the review rubric this must score
   5/5 against on all four axes (GenLayer Fit, Contract Quality, Engineering,
   Frontend/UX).
 - `/Users/macbook/Documents/stitch_dark_theme_ui_design/` — frontend design
-  reference (DESIGN.md tokens + HTML mockups for dispute explorer, claim
-  filing, consensus inspector, settlements/challenge vault, landing page,
-  logo). These are references to adapt, not to copy verbatim.
-- `/Users/macbook/Witness-Weaver/contracts/witnessweave_contract.py` and
-  `/Users/macbook/witnessmark/contracts/witnessmark_contract.py` — the two
-  prior GenLayer contracts that scored 560/480 points; architecture directly
-  informed this contract (see above).
-- `/Users/macbook/review/proof-of-work/frontend/` — a working, already-wired
-  Next.js + genlayer-js + wagmi/viem frontend against a different GenLayer
-  contract. Its `lib/genlayer/*` files (client.ts, wallet.ts, rpc.ts,
-  fees.ts, WalletProvider.tsx) are generic GenLayer plumbing and were copied
-  as-is into `/Users/macbook/origin/frontend/lib/genlayer/`. Its
-  `lib/contracts/ProofOfWork.ts` is the pattern `lib/contracts/OriginTrace.ts`
-  should mirror (read/write wrapper, transaction receipt status handling via
-  the SDK's actual lifecycle states, not string-matched RPC fields).
+  reference (DESIGN.md tokens + HTML mockups). References to adapt, not
+  copy verbatim.
+- `/Users/macbook/Witness-Weaver/` and `/Users/macbook/witnessmark/` — the
+  two prior GenLayer contracts whose architecture directly informed this
+  one (see "Architecture lineage" above).
+- `/Users/macbook/review/proof-of-work/frontend/` — a working, already-
+  wired Next.js + genlayer-js + wagmi/viem frontend against a different
+  GenLayer contract. Its generic `lib/genlayer/*` plumbing (client.ts,
+  wallet.ts, rpc.ts, fees.ts, WalletProvider.tsx) was initially copied in,
+  then largely rewritten for Reown AppKit (see gotchas above) — only
+  `fees.ts` (transaction fee-preset estimation) survived unchanged and is
+  wired into `OriginTrace.ts`'s write path. Its `lib/contracts/ProofOfWork.ts`
+  is the pattern `lib/contracts/OriginTrace.ts` mirrors (read/write wrapper,
+  transaction receipt status handling via the SDK's actual lifecycle
+  states, not string-matched RPC fields).
 
-## What's NOT done yet (as of this session)
+## Still not done
 
-- Frontend pages (landing, create-dispute, claim-filing, dispute detail
-  with live evaluation/consensus status, challenge submission, withdrawal
-  dashboard, history, profile, settings) — scaffolding started
-  (`frontend/` directory with copied genlayer plumbing + shadcn ui
-  components), but `lib/contracts/OriginTrace.ts` and the actual pages are
-  not yet written.
-- Backend (Postgres schema, Docker setup, Fly.io deployment config, auth,
-  dispute/claim indexing off the contract).
-- Favicon/logo (reference: `origin_trace_protocol_logo.html`).
-- Integration tests against a live GenVM runner (to verify the actual
-  native-GEN transfer path that direct mode cannot simulate).
-- Deployment checklist/instructions handoff document for the user's own
-  StudioNet deployment.
+- Integration tests against a live GenVM runner (would verify the actual
+  native-GEN transfer path that direct-mode tests cannot simulate).
+- WalletConnect-remote-signer verification against the current genlayer-js
+  SDK reference (see "Known gap" under Frontend above).
+- A settlements/history page and richer profile/withdrawal dashboard
+  polish matching `settlements_challenge_vault.html` and
+  `consensus_equivalence_inspector.html` reference designs more closely.
+- Restricting backend CORS to the actual frontend origin (currently
+  permissive `cors()` with no origin allowlist — fine for early
+  development, should be tightened before treating this as
+  production-hardened).

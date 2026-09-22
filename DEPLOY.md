@@ -1,97 +1,137 @@
-# Contract deployment checklist (you do this part)
+# Deployment reference
 
-The GenLayer Intelligent Contract is written, linted, and tested — but per
-the project's own working rules, **the contract is deployed by you, not by
-this tooling.** Once you've deployed it, come back and complete these steps
-so the rest of the (already-live) app picks it up.
+Status: **contract deployed, both live services wired and confirmed
+reaching it.** This doc is kept as a reference for redeploying any piece
+(a new contract version, a backend/frontend update, or a fresh environment
+entirely) — not a pending checklist.
 
-## 1. Deploy `contracts/origin_trace.py` to StudioNet
+## Current live state
 
-Use the GenLayer CLI / GenLayer Studio, following the current official
-workflow at https://docs.genlayer.com and https://skills.genlayer.com.
+| Piece | Where | Address / URL |
+|---|---|---|
+| Contract | GenLayer StudioNet | `0xda68997ac7D581aa0C280e0547cCf5375935c710` |
+| Backend | Fly.io app `origin-trace-backend`, region `iad` | https://origin-trace-backend.fly.dev |
+| Backend DB | Fly Postgres cluster `origin-trace-db` (attached) | internal only, via `DATABASE_URL` secret |
+| Backend cache | Upstash Redis | via `REDIS_URL` secret |
+| Frontend | Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects` | https://origin-trace-wine.vercel.app |
 
-Before deploying, it's worth re-running the quality gates one more time:
+Confirmed working end-to-end: `fly logs -a origin-trace-backend` shows the
+poller successfully calling `get_contract_info()` against the real
+contract and cycling cleanly (`[poller] cycle complete: N total disputes,
+M active re-synced, K had claim changes worth fetching`); the frontend
+loads in a real browser with the design system rendering correctly and the
+Reown wallet modal opening with the full wallet list.
+
+## Redeploying the contract (if you ship a new version)
+
+The contract is always deployed by the project owner, not by any tooling
+in this repo — that's a deliberate project rule, not a limitation.
 
 ```bash
-# use Python 3.12+ -- see memory/MEMORY.md for why
+# from repo root, Python 3.12+ (see memory/MEMORY.md for why)
 pip install -r requirements.txt
 genvm-lint check contracts/origin_trace.py
 pytest tests/direct/ -v
 ```
 
-After deployment, you'll have a `DEPLOYED_CONTRACT_ADDRESS` (a `0x...`
-EVM-style address).
+Then deploy via the GenLayer CLI / Studio following the current official
+workflow at https://docs.genlayer.com and https://skills.genlayer.com. Once
+you have a new `DEPLOYED_CONTRACT_ADDRESS`, wire it into both live services:
 
-## 2. Wire the address into the live backend (Fly.io)
-
-The backend is already deployed and running 24/7 at
-**https://origin-trace-backend.fly.dev**. It currently has an empty
-`CONTRACT_ADDRESS`, so its poller is idling (logging a clear "not
-configured yet" message every cycle rather than erroring). Set it:
+### Backend (Fly.io)
 
 ```bash
-fly secrets set -a origin-trace-backend CONTRACT_ADDRESS="0xYOUR_ADDRESS"
+fly secrets set -a origin-trace-backend CONTRACT_ADDRESS="0xYOUR_NEW_ADDRESS"
 ```
 
-Fly will automatically redeploy the machine with the new secret. Confirm
-the poller picks it up:
+Fly redeploys the machine automatically on secret change. Confirm:
 
 ```bash
 fly logs -a origin-trace-backend
 ```
 
-You should see `[poller] cycle complete: 0 total disputes, 0 active
-re-synced` instead of the "not configured" error.
+You should see `[poller] cycle complete: ...` lines, not a `CONTRACT_ADDRESS
+is not configured yet` error.
 
-## 3. Wire the address into the live frontend (Vercel)
-
-The frontend is already deployed and running at
-**https://origin-trace-wine.vercel.app**.
+### Frontend (Vercel)
 
 ```bash
 cd frontend
-echo -n "0xYOUR_ADDRESS" | vercel env add NEXT_PUBLIC_CONTRACT_ADDRESS production --scope adebiyi2002gmailcoms-projects
+vercel env rm NEXT_PUBLIC_CONTRACT_ADDRESS production --scope adebiyi2002gmailcoms-projects --yes
+echo -n "0xYOUR_NEW_ADDRESS" | vercel env add NEXT_PUBLIC_CONTRACT_ADDRESS production --scope adebiyi2002gmailcoms-projects
 vercel deploy --prod --yes --scope adebiyi2002gmailcoms-projects
 ```
 
-Also update your local `.env.local` if you're running the frontend locally
-for development:
+Also update local `.env.local` / `.env` (both gitignored) if developing
+locally:
 
 ```
-NEXT_PUBLIC_CONTRACT_ADDRESS=0xYOUR_ADDRESS
+NEXT_PUBLIC_CONTRACT_ADDRESS=0xYOUR_NEW_ADDRESS   # frontend/.env.local
+CONTRACT_ADDRESS=0xYOUR_NEW_ADDRESS               # backend/.env
 ```
 
-## 4. Verify the full loop end-to-end
+## Verifying the full loop end-to-end
 
 1. Open https://origin-trace-wine.vercel.app, connect a wallet funded with
    GEN on StudioNet.
-2. File a dispute (`/create`).
-3. From a second address, file a competing claim on that dispute.
-4. Wait for the filing window to close, then trigger evaluation.
-5. Confirm the backend picked up the new dispute:
+2. Go to `/create`, click **AUTOFILL SAMPLE**, submit.
+3. From a second wallet, open the new dispute and click **AUTOFILL SAMPLE
+   A** (or **B**) on the file-claim form, then submit — repeat from a third
+   wallet with the other sample if you want a genuine two-claim race.
+4. Confirm the backend picked it up:
    `curl https://origin-trace-backend.fly.dev/api/disputes`
-6. Watch the ranking post, let the challenge window close, finalize, and
-   withdraw.
+5. Wait for the filing window to close (the autofill sample uses a 24h
+   window — shorten it in `frontend/app/create/page.tsx`'s
+   `FILING_WINDOW_OPTIONS` for faster local testing if needed), then click
+   **TRIGGER EVALUATION**.
+6. Watch the preliminary ranking post. Optionally submit challenge evidence
+   (the claim card has a **SAMPLE** button for this too) before the
+   challenge window closes.
+7. Click **FINALIZE**, then **WITHDRAW** on the winning/refunded claim.
 
-## Ongoing costs to be aware of
+## Redeploying the backend
+
+```bash
+cd backend
+fly deploy --ha=false
+```
+
+`--ha=false` avoids provisioning a second machine for local iteration; drop
+it (or set it explicitly to run 2 machines) if you want real high
+availability rather than just the single always-on machine currently
+running.
+
+## Redeploying the frontend
+
+```bash
+cd frontend
+vercel deploy --prod --yes --scope adebiyi2002gmailcoms-projects
+```
+
+## Ongoing costs
 
 - **Fly.io**: one always-on `shared-cpu-1x` / 512MB machine
-  (`origin-trace-backend`) plus one Postgres node
-  (`origin-trace-db`, 1GB volume). Both are configured to never scale to
-  zero, per the "must never die" requirement — this means they bill
-  continuously, not just when someone starts them. Check
-  `fly billing` / the Fly dashboard for current rates.
+  (`origin-trace-backend`) plus one Postgres node (`origin-trace-db`, 1GB
+  volume, unmanaged flex — the user is responsible for its own ops/backups,
+  per Fly's own warning at creation time). Both are configured to never
+  scale to zero, per the "must never die" requirement — this means they
+  bill continuously, not just when someone visits the site. Check `fly
+  billing` or the Fly dashboard for current rates on the `personal` org.
 - **Upstash Redis**: pay-as-you-go on request volume. The backend caps
-  itself at ~4000 GenLayer RPC requests/day via its own Redis counter, but
-  its own Redis usage (cache reads/writes for the API layer) scales with
-  frontend traffic — monitor this if traffic grows significantly.
+  itself at ~4000 GenLayer RPC requests/day via its own Redis counter (see
+  `backend/src/redis.ts` and the "Request economy" section of the main
+  README) — but its own Redis usage for the API-layer cache scales with
+  frontend traffic, independent of that cap. Monitor if traffic grows.
 - **Vercel**: frontend hosting, typically free at low traffic on a hobby
   plan.
 
-## If you want to tear it all down
+## Tearing it all down
 
 ```bash
 fly apps destroy origin-trace-backend
 fly apps destroy origin-trace-db
 vercel remove origin-trace --scope adebiyi2002gmailcoms-projects
 ```
+
+This does not affect the deployed contract — GenLayer contracts, once
+deployed, exist independently of this app's infrastructure.
