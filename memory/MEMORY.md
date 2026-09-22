@@ -4,6 +4,19 @@ This file is the persistent source of truth for this project across sessions.
 Read it first before making architectural decisions. Update it whenever a
 decision changes.
 
+## Deployed contract address
+
+`0xda68997ac7D581aa0C280e0547cCf5375935c710` — deployed by the user to
+GenLayer StudioNet. Wired into both live services:
+- Fly secret `CONTRACT_ADDRESS` on `origin-trace-backend` (confirmed via
+  `fly logs`: poller now reaches the real contract, `get_contract_info()`
+  succeeds, `0 total disputes` since none have been created yet).
+- Vercel env var `NEXT_PUBLIC_CONTRACT_ADDRESS` on the `origin-trace`
+  project, production environment (redeployed after setting it).
+- Local `backend/.env` and `frontend/.env.local` (gitignored, not
+  committed — this is why there was nothing to `git commit` after wiring
+  the address in; only the live secrets stores and local env files changed).
+
 ## What this project is
 
 ORIGIN TRACE is an onchain priority-dispute resolution protocol. Two or more
