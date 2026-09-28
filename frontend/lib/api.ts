@@ -6,7 +6,7 @@
 // and single-record "did my just-submitted transaction land yet" reads
 // still go straight to the contract via lib/contracts/OriginTrace.ts.
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "https://origin-trace-backend-starlit-sound-5755.fly.dev";
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
@@ -27,6 +27,7 @@ export interface DisputeRow {
   claim_count: number;
   created_ts: number;
   filing_deadline_ts: number;
+  evaluation_timeout_ts: number;
   challenge_deadline_ts: number;
   ranking_verdict: string;
   final_winner_claim_id: string;

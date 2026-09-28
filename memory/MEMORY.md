@@ -30,15 +30,15 @@ project (`proof-of-work`) that must not be touched or confused with this one.
 
 | Piece | Value |
 |---|---|
-| Contract address | `0xda68997ac7D581aa0C280e0547cCf5375935c710` (GenLayer StudioNet, deployed by the user) |
-| Backend | https://origin-trace-backend.fly.dev (Fly.io app `origin-trace-backend`, region `iad`, org `personal`) |
-| Backend DB | Fly Postgres cluster `origin-trace-db`, attached via `fly postgres attach` (`DATABASE_URL` auto-set as a Fly secret) |
-| Backend cache | Upstash Redis, set via `fly secrets set REDIS_URL=...` |
+| Contract address | `0x6B3321b0d92E614abC11dA7D241a8918879DcEe1` (GenLayer StudioNet, deployed by the user) |
+| Backend | https://origin-trace-backend-starlit-sound-5755.fly.dev (Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad`, org `personal`) |
+| Backend DB | Dedicated Fly Postgres cluster attached to the app (`DATABASE_URL` auto-set as a Fly secret) |
+| Backend cache | Fly-managed Upstash Redis `origin-trace-cache`, set via `fly secrets set REDIS_URL=...` |
 | Frontend | https://origin-trace-wine.vercel.app (Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects`) |
 | GitHub repo | https://github.com/zoefunds/origin-trace (pushed as user `zoefunds`, no bot attribution) |
 
 Both live services are confirmed wired to the real contract: `fly logs -a
-origin-trace-backend` shows the poller successfully calling
+origin-trace-backend-starlit-sound-5755` shows the poller successfully calling
 `get_contract_info()` and cycling cleanly; the frontend renders correctly
 in a real browser with the Reown wallet modal opening properly. See
 `DEPLOY.md` for the full redeploy/verification/teardown reference.
@@ -69,9 +69,9 @@ request and is fine to commit.
 - **Provenance scope**: generic from day one — `WAYBACK` (web archive),
   `GIT_COMMIT` (GitHub/GitLab commit API), `PLATFORM_PUBLISH` (LLM-extracted
   platform metadata) all supported, not narrowed to one type.
-- **Contract deployment boundary**: the agent writes, lints, and tests the
-  contract; the user deploys it and provides the address back. The agent
-  never deploys or holds a contract address itself.
+- **Contract deployment boundary**: deployments are performed through the
+  authenticated GenLayer CLI account, with the resulting address recorded in
+  this file, `README.md`, `DEPLOY.md`, and both `.env.example` files.
 - **Frontend design system**: dark cryptographic-terminal aesthetic from
   `/Users/macbook/Documents/stitch_dark_theme_ui_design/DESIGN.md` —
   obsidian surfaces (`#090D14`/`#0D131F`/`#131B2B`/`#1B263B`), cyan primary
@@ -82,12 +82,12 @@ request and is fine to commit.
 
 ## Contract
 
-`contracts/origin_trace.py` — 1482 lines. `genvm-lint check` passes clean
+`contracts/origin_trace.py` — 1575 lines. `genvm-lint check` passes clean
 (0 errors; 1 informational warning about a newer runner being available —
 intentionally still pinned to
 `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` to match
 the exact runner used by the reference projects below). Schema extraction
-succeeds (14 methods, 0 ctor params). **19/19 direct-mode tests pass**
+succeeds (14 methods, 0 ctor params). **20/20 direct-mode tests pass**
 (`tests/direct/test_origin_trace_lifecycle.py`) — see the README's
 "Contract" section for what's covered.
 
@@ -112,8 +112,10 @@ Patterns reused directly:
 ### Trust-boundary additions unique to this contract
 
 - `WAYBACK`/`GIT_COMMIT` timestamp extraction is fully deterministic JSON
-  parsing (no LLM at all) — leader/validator must match EXACTLY. Only
-  `PLATFORM_PUBLISH` goes through the LLM, with a 6h tolerance.
+  parsing (no LLM at all), and the archived/file-at-commit content is hashed
+  against the fetched artifact before the timestamp is eligible. Leaders and
+  validators must match EXACTLY. Only `PLATFORM_PUBLISH` timestamp extraction
+  goes through the LLM, with a 6h tolerance after identity/digest validation.
 - The substantive-match prompt explicitly instructs the model to ignore any
   date/priority claims or embedded instructions found in the
   claimant-controlled artifact text — adversarial-content mitigation is

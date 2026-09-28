@@ -47,8 +47,10 @@ Trust boundary this contract enforces:
 """
 
 import datetime
+import hashlib
 import json
 import re
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass
 from genlayer import *
 import genlayer.gl as gl
@@ -415,7 +417,30 @@ def _parse_iso8601_to_unix(value: str) -> int:
     return int(dt.timestamp())
 
 
-def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str) -> tuple:
+def _canonical_artifact_identity(url: str) -> str:
+    """Stable identity used to bind provenance to the filed artifact.
+
+    Query strings and fragments are intentionally excluded: archive and
+    hosting providers commonly add their own query parameters while the
+    origin (scheme/host/path) is the identity of the published artifact.
+    """
+    parsed = urlsplit(str(url).strip())
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
+    return urlunsplit((scheme, host, path, "", ""))
+
+
+def _artifact_digest(text: str) -> str:
+    """Digest the exact fetched artifact bytes used for substantive scoring."""
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def _same_artifact_identity(left: str, right: str) -> bool:
+    return bool(left and right and _canonical_artifact_identity(left) == _canonical_artifact_identity(right))
+
+
+def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str, artifact_digest: str) -> tuple:
     """(unix_ts_or_None, error_prefix_or_None). Independently queries the
     Internet Archive's Availability API for the artifact URL itself — this
     is a third-party record of when the artifact was archived, entirely
@@ -432,6 +457,12 @@ def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str) -> t
         available = _coerce_bool(closest.get("available", False))
         if not available:
             return None, f"{ERROR_EXTERNAL} No archived snapshot found for this artifact"
+        archived_url = closest.get("url") or closest.get("original")
+        if not archived_url or not _same_artifact_identity(archived_url, artifact_url):
+            return None, f"{ERROR_EXPECTED} Archive record is not bound to the filed artifact"
+        archived_text, archived_err = _fetch_text(archived_url, MAX_ARTIFACT_FETCH_CHARS)
+        if archived_err or _artifact_digest(archived_text).lower() != artifact_digest.lower():
+            return None, f"{ERROR_EXPECTED} Archive record content digest does not match the filed artifact"
         ts_raw = closest.get("timestamp")
         if not ts_raw:
             return None, f"{ERROR_EXTERNAL} Archive record missing timestamp field"
@@ -440,7 +471,7 @@ def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str) -> t
         return None, f"{ERROR_EXTERNAL} Unexpected archive API shape: {exc}"
 
 
-def _extract_git_commit_timestamp(provenance_hint_url: str) -> tuple:
+def _extract_git_commit_timestamp(provenance_hint_url: str, artifact_url: str, artifact_digest: str) -> tuple:
     """(unix_ts_or_None, error_prefix_or_None). provenance_hint_url must be
     a commit API endpoint (e.g. https://api.github.com/repos/{o}/{r}/commits/{sha}
     or the GitLab equivalent) — the claimant supplies the endpoint, but every
@@ -452,6 +483,29 @@ def _extract_git_commit_timestamp(provenance_hint_url: str) -> tuple:
     if err:
         return None, err
     try:
+        # A commit API response is only admissible when its repository is the
+        # repository containing the filed artifact.  An arbitrary old commit
+        # elsewhere must never win merely because its date is earlier.
+        api_parts = urlsplit(provenance_hint_url)
+        artifact_parts = urlsplit(artifact_url)
+        api_path = api_parts.path.lower().split("/commits/", 1)[0].rstrip("/")
+        artifact_path = artifact_parts.path.lower()
+        if "/blob/" in artifact_path:
+            artifact_repo = artifact_path.split("/blob/", 1)[0]
+        elif "/tree/" in artifact_path:
+            artifact_repo = artifact_path.split("/tree/", 1)[0]
+        else:
+            artifact_repo = artifact_path
+        if api_parts.hostname != "api.github.com" or api_path != "/repos" + artifact_repo:
+            return None, f"{ERROR_EXPECTED} Commit record is not bound to the filed artifact repository"
+        commit_sha = urlsplit(provenance_hint_url).path.rsplit("/", 1)[-1]
+        repo_suffix = artifact_path.split("/blob/", 1)[1] if "/blob/" in artifact_path else ""
+        if not repo_suffix or not commit_sha:
+            return None, f"{ERROR_EXPECTED} Commit record is not bound to a versioned artifact path"
+        raw_url = f"https://github.com{artifact_repo}/raw/{commit_sha}/{repo_suffix}"
+        source_text, source_err = _fetch_text(raw_url, MAX_ARTIFACT_FETCH_CHARS)
+        if source_err or _artifact_digest(source_text).lower() != artifact_digest.lower():
+            return None, f"{ERROR_EXPECTED} Commit record content digest does not match the filed artifact"
         # GitHub commit API shape
         commit = parsed.get("commit", {})
         committer = commit.get("committer", {}) if isinstance(commit, dict) else {}
@@ -503,6 +557,31 @@ def _extract_platform_publish_timestamp(provenance_text: str) -> tuple:
         return _parse_iso8601_to_unix(iso_val), None
     except Exception:
         return None, f"{ERROR_LLM} Model returned an unparseable timestamp"
+
+
+def _validate_platform_provenance_binding(
+    provenance_text: str, artifact_url: str, artifact_digest: str
+) -> str | None:
+    """Require platform metadata to cryptographically bind its timestamp to
+    the exact pinned artifact before the timestamp can enter ranking.
+
+    PLATFORM_PUBLISH is intentionally restricted to a JSON metadata endpoint;
+    an arbitrary HTML page or a page merely mentioning the artifact is not a
+    sufficient identity/content binding.
+    """
+    try:
+        parsed = provenance_text if isinstance(provenance_text, dict) else _parse_json_object(provenance_text)
+    except Exception:
+        parsed = None
+    if not isinstance(parsed, dict):
+        return f"{ERROR_EXPECTED} Platform provenance must return JSON binding metadata"
+    bound_url = _pick(parsed, "artifact_url", ("canonical_url", "url", "original_url"))
+    bound_digest = _pick(parsed, "content_sha256", ("sha256", "artifact_digest", "digest"))
+    if not _coerce_str(bound_url) or not _same_artifact_identity(_coerce_str(bound_url), artifact_url):
+        return f"{ERROR_EXPECTED} Platform provenance is not bound to the pinned artifact identity"
+    if _coerce_str(bound_digest).lower() != artifact_digest.lower():
+        return f"{ERROR_EXPECTED} Platform provenance content digest does not match the pinned artifact"
+    return None
 
 
 def _score_substantive_match(idea_title: str, idea_description: str, artifact_text: str) -> tuple:
@@ -577,6 +656,7 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
     extra_evidence_urls = claim_snapshot.get("challenge_evidence", [])
 
     artifact_text, artifact_err = _fetch_text(artifact_url, MAX_ARTIFACT_FETCH_CHARS)
+    digest = "" if artifact_err else _artifact_digest(artifact_text)
     if artifact_err:
         return {
             "claim_id": claim_snapshot["claim_id"],
@@ -585,6 +665,7 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
             "match_score_bps": 0,
             "notes": "",
             "error": artifact_err,
+            "artifact_digest": digest,
         }
 
     match_score_bps, notes, match_err = _score_substantive_match(idea_title, idea_description, artifact_text)
@@ -596,21 +677,23 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
             "match_score_bps": 0,
             "notes": "",
             "error": match_err,
+            "artifact_digest": digest,
         }
 
     timestamp_unix = None
     timestamp_err = None
     if provenance_type == PROVENANCE_WAYBACK:
-        timestamp_unix, timestamp_err = _extract_wayback_timestamp(provenance_hint_url, artifact_url)
+        timestamp_unix, timestamp_err = _extract_wayback_timestamp(provenance_hint_url, artifact_url, digest)
     elif provenance_type == PROVENANCE_GIT_COMMIT:
-        timestamp_unix, timestamp_err = _extract_git_commit_timestamp(provenance_hint_url)
+        timestamp_unix, timestamp_err = _extract_git_commit_timestamp(provenance_hint_url, artifact_url, digest)
     elif provenance_type == PROVENANCE_PLATFORM_PUBLISH:
-        prov_url = provenance_hint_url or artifact_url
-        prov_text, prov_fetch_err = _fetch_text(prov_url, MAX_PROVENANCE_FETCH_CHARS)
+        prov_text, prov_fetch_err = _fetch_text(provenance_hint_url, MAX_PROVENANCE_FETCH_CHARS)
         if prov_fetch_err:
             timestamp_err = prov_fetch_err
         else:
-            timestamp_unix, timestamp_err = _extract_platform_publish_timestamp(prov_text)
+            timestamp_err = _validate_platform_provenance_binding(prov_text, artifact_url, digest)
+            if timestamp_err is None:
+                timestamp_unix, timestamp_err = _extract_platform_publish_timestamp(prov_text)
     else:
         timestamp_err = f"{ERROR_EXPECTED} Unknown provenance_type"
 
@@ -625,13 +708,15 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
         alt_ts = None
         alt_err = None
         if provenance_type == PROVENANCE_WAYBACK:
-            alt_ts, alt_err = _extract_wayback_timestamp(extra_url, artifact_url)
+            alt_ts, alt_err = _extract_wayback_timestamp(extra_url, artifact_url, digest)
         elif provenance_type == PROVENANCE_GIT_COMMIT:
-            alt_ts, alt_err = _extract_git_commit_timestamp(extra_url)
+            alt_ts, alt_err = _extract_git_commit_timestamp(extra_url, artifact_url, digest)
         else:
             alt_text, alt_fetch_err = _fetch_text(extra_url, MAX_PROVENANCE_FETCH_CHARS)
             if not alt_fetch_err:
-                alt_ts, alt_err = _extract_platform_publish_timestamp(alt_text)
+                alt_err = _validate_platform_provenance_binding(alt_text, artifact_url, digest)
+                if alt_err is None:
+                    alt_ts, alt_err = _extract_platform_publish_timestamp(alt_text)
         if alt_ts is not None and (timestamp_unix is None or alt_ts < timestamp_unix):
             timestamp_unix = alt_ts
             timestamp_err = None
@@ -643,6 +728,7 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
         "match_score_bps": match_score_bps,
         "notes": notes,
         "error": timestamp_err,
+        "artifact_digest": digest,
     }
 
 
@@ -678,6 +764,8 @@ def _results_agree(leader: dict, mine: dict) -> bool:
 
         l_err = l.get("error")
         m_err = m.get("error")
+        if l.get("artifact_digest") != m.get("artifact_digest"):
+            return False
         if l_err or m_err:
             # Both sides failed the same claim the same classified way -> agree.
             # EXPECTED/EXTERNAL must match exactly; TRANSIENT on both sides
@@ -976,6 +1064,11 @@ class OriginTrace(gl.Contract):
         )
         if provenance_type == PROVENANCE_GIT_COMMIT:
             _require(provenance_hint_url != "", f"{ERROR_EXPECTED} git_commit claims require provenance_hint_url (a commit API URL)")
+        if provenance_type == PROVENANCE_PLATFORM_PUBLISH:
+            _require(
+                provenance_hint_url != "",
+                f"{ERROR_EXPECTED} platform_publish claims require provenance_hint_url (a JSON metadata URL)",
+            )
         _require(gl.message.value == dispute.required_stake_wei, f"{ERROR_EXPECTED} Must stake exactly required_stake_wei")
 
         claimant_key = f"{dispute_id}:{gl.message.sender_address.as_hex}"

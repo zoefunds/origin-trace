@@ -30,7 +30,7 @@ def mock_wayback(direct_vm, domain_fragment: str, timestamp_yyyymmddhhmmss: str,
     artifact-page fetch itself (see mock_artifact_page)."""
     body = {
         "archived_snapshots": (
-            {"closest": {"available": True, "timestamp": timestamp_yyyymmddhhmmss, "status": "200"}}
+            {"closest": {"available": True, "timestamp": timestamp_yyyymmddhhmmss, "status": "200", "url": f"https://{domain_fragment}/post"}}
             if available
             else {}
         )

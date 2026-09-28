@@ -20,8 +20,8 @@ withdrawable.
 | Service | URL | Notes |
 |---|---|---|
 | Frontend | https://origin-trace-wine.vercel.app | Next.js on Vercel |
-| Backend API | https://origin-trace-backend.fly.dev | Always-on indexer on Fly.io |
-| Contract | [`0xda68997ac7D581aa0C280e0547cCf5375935c710`](https://studio.genlayer.com) | GenLayer StudioNet |
+| Backend API | https://origin-trace-backend-starlit-sound-5755.fly.dev | Always-on indexer on Fly.io |
+| Contract | [`0x6B3321b0d92E614abC11dA7D241a8918879DcEe1`](https://studio.genlayer.com) | GenLayer StudioNet |
 | Repository | https://github.com/zoefunds/origin-trace | This repo |
 
 ## The core loop
@@ -50,16 +50,17 @@ about exactly what's enforced and where in the code it lives
 
 - **No self-reported dates, ever.** A claimant's own text is never trusted
   for timing. Timestamps come only from an independently-fetched
-  third-party source: the Wayback Machine's Availability API, a GitHub/
-  GitLab commit API's own `committer.date` field, or (for
-  `PLATFORM_PUBLISH`) LLM-extracted metadata from the hosting *platform's*
-  page, never the claimant's artifact page.
-- **Deterministic timestamp parsing where possible.** `WAYBACK` and
+  third-party source: the Wayback Machine's Availability API, a GitHub
+  commit API plus the file at the claimed commit, or (for
+  `PLATFORM_PUBLISH`) structured metadata from the hosting platform. Every
+  source must bind to the artifact's canonical identity and match the
+  SHA-256 digest of the fetched artifact before its timestamp is eligible.
+- **Deterministic timestamp and content binding.** `WAYBACK` and
   `GIT_COMMIT` timestamps are parsed straight out of structured JSON API
-  responses — no LLM in that path at all. Leader and validator must match
-  **exactly** on these, a much stronger equivalence bar than an LLM-derived
-  value. Only `PLATFORM_PUBLISH` (genuinely unstructured metadata) goes
-  through the model, and only gets a 6-hour tolerance.
+  responses — no LLM in that path at all — and the archived/file-at-commit
+  content is hashed against the artifact. Only `PLATFORM_PUBLISH` metadata
+  timestamp extraction goes through the model, and only gets a 6-hour
+  tolerance after URL and digest validation.
   See `_extract_wayback_timestamp`, `_extract_git_commit_timestamp`,
   `_extract_platform_publish_timestamp`.
 - **Every validator independently re-fetches everything.** The leader
@@ -101,8 +102,8 @@ about exactly what's enforced and where in the code it lives
 ## Repository layout
 
 ```
-contracts/origin_trace.py     GenLayer Intelligent Contract (Python, GenVM) — 1482 lines
-tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 19 tests
+contracts/origin_trace.py     GenLayer Intelligent Contract (Python, GenVM) — 1575 lines
+tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 20 tests
 frontend/                     Next.js 16 app (wallet connect, dispute UI, autofill test data)
 backend/                      Always-on indexer/API (Postgres + Redis-guarded GenLayer polling)
 memory/MEMORY.md              Persistent project memory / decision log for future sessions
@@ -115,7 +116,7 @@ DEPLOY.md                     Contract deployment + live-service wiring referenc
 # use Python 3.12+ (see memory/MEMORY.md for why this matters)
 pip install -r requirements.txt
 genvm-lint check contracts/origin_trace.py     # 0 errors
-pytest tests/direct/ -v                        # 19 passed
+pytest tests/direct/ -v                        # 20 passed
 ```
 
 The direct-mode test suite (`tests/direct/test_origin_trace_lifecycle.py`)
@@ -207,7 +208,7 @@ only pays for claims when they've genuinely changed.
 
 Deploy target: Fly.io (`backend/fly.toml`, `min_machines_running = 1` /
 `auto_stop_machines = false` — the "must never die" requirement, currently
-live at https://origin-trace-backend.fly.dev backed by a Fly Postgres
+live at https://origin-trace-backend-starlit-sound-5755.fly.dev backed by a Fly Postgres
 cluster and Upstash Redis).
 
 ## Architecture lineage

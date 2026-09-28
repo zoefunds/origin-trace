@@ -65,6 +65,8 @@ export default function DisputeDetailPage() {
   const [provenanceType, setProvenanceType] = useState("WAYBACK");
   const [provenanceHintUrl, setProvenanceHintUrl] = useState("");
   const [challengeUrlByClaim, setChallengeUrlByClaim] = useState<Record<string, string>>({});
+  const [optimisticClaimFiled, setOptimisticClaimFiled] = useState(false);
+  const [withdrawnClaimIds, setWithdrawnClaimIds] = useState<Set<string>>(new Set());
 
   const disputeQuery = useQuery({
     queryKey: ["dispute", id],
@@ -83,6 +85,24 @@ export default function DisputeDetailPage() {
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ["dispute", id] });
     queryClient.invalidateQueries({ queryKey: ["dispute-claims", id] });
+  }
+
+  function markSingleFilerRefundPending() {
+    // The read API is intentionally cached and may take several minutes to
+    // observe the onchain write. Reflect the committed refund immediately so
+    // the claimant can continue to the separate pull-based WITHDRAW step.
+    queryClient.setQueryData(["dispute", id], (current: any) =>
+      current ? { ...current, status: "INCONCLUSIVE" } : current,
+    );
+    queryClient.setQueryData(["dispute-claims", id], (current: any[] | undefined) =>
+      current?.map((claim) => ({ ...claim, status: "REFUNDED" })) ?? current,
+    );
+  }
+
+  function markDisputeStatus(status: string) {
+    queryClient.setQueryData(["dispute", id], (current: any) =>
+      current ? { ...current, status } : current,
+    );
   }
 
   function autofillClaim(sample: (typeof SAMPLE_CLAIMS)["A"]) {
@@ -112,9 +132,19 @@ export default function DisputeDetailPage() {
   if (!dispute) return <p className="text-muted-foreground">Dispute not found.</p>;
 
   const myClaim = claims.find((c) => c.claimant?.toLowerCase() === address?.toLowerCase());
-  const canFileClaim = dispute.status === "FILING_OPEN" && isConnected && !myClaim;
-  const canTriggerEval = dispute.status === "FILING_OPEN" && dispute.claim_count >= 2;
-  const canFinalize = dispute.status === "RANKED";
+  const now = Math.floor(Date.now() / 1000);
+  const isCreator = dispute.creator?.toLowerCase() === address?.toLowerCase();
+  const canFileClaim = dispute.status === "FILING_OPEN" && isConnected && !myClaim && !optimisticClaimFiled;
+  const filingClosed = now > dispute.filing_deadline_ts;
+  const challengeClosed = now > dispute.challenge_deadline_ts;
+  const canCancel = isCreator && dispute.status === "FILING_OPEN" && dispute.claim_count === 0;
+  const canTriggerEval = dispute.status === "FILING_OPEN" && filingClosed && dispute.claim_count >= 2;
+  const canSingleFilerRefund =
+    dispute.status === "FILING_OPEN" && filingClosed && dispute.claim_count < 2;
+  const canFinalize = dispute.status === "RANKED" && challengeClosed;
+  const canTimeout =
+    ["FILING_OPEN", "VALIDATING", "RANKED"].includes(dispute.status) &&
+    now > dispute.evaluation_timeout_ts;
   const isMyClaimWithdrawable =
     myClaim && (myClaim.status === "WINNER" || myClaim.status === "REFUNDED");
 
@@ -232,13 +262,16 @@ export default function DisputeDetailPage() {
               )}
 
               {c.claimant?.toLowerCase() === address?.toLowerCase() &&
-                (c.status === "WINNER" || c.status === "REFUNDED") && (
+                (c.status === "WINNER" || c.status === "REFUNDED") &&
+                BigInt(c.stake_deposited || 0) > 0n &&
+                !withdrawnClaimIds.has(c.claim_id) && (
                   <Button
                     size="sm"
                     className="mt-3"
                     disabled={busy === `withdraw-${c.claim_id}` || !contract}
                     onClick={() => withBusyState(`withdraw-${c.claim_id}`, async () => {
                       await contract!.withdraw(c.claim_id);
+                      setWithdrawnClaimIds((previous) => new Set(previous).add(c.claim_id));
                     })}
                   >
                     {busy === `withdraw-${c.claim_id}` ? "WITHDRAWING…" : "WITHDRAW"}
@@ -311,15 +344,19 @@ export default function DisputeDetailPage() {
           <Button
             disabled={busy === "file-claim" || !contract || !artifactUrl}
             onClick={() =>
-              withBusyState("file-claim", async () => {
-                await contract!.fileClaim(
+                      withBusyState("file-claim", async () => {
+                        await contract!.fileClaim(
                   dispute.dispute_id,
                   artifactUrl.trim(),
                   provenanceType,
                   provenanceHintUrl.trim(),
-                  BigInt(dispute.required_stake_wei)
-                );
-              })
+                          BigInt(dispute.required_stake_wei)
+                        );
+                        setOptimisticClaimFiled(true);
+                        queryClient.setQueryData(["dispute", id], (current: any) =>
+                          current ? { ...current, claim_count: Number(current.claim_count || 0) + 1 } : current,
+                        );
+                      })
             }
             className="font-mono text-xs"
           >
@@ -329,12 +366,26 @@ export default function DisputeDetailPage() {
       )}
 
       <section className="flex flex-wrap gap-3">
+        {canCancel && (
+          <Button
+            variant="secondary"
+            disabled={busy === "cancel" || !contract}
+            onClick={() => withBusyState("cancel", async () => {
+              await contract!.cancelDispute(dispute.dispute_id);
+              markDisputeStatus("CANCELLED");
+            })}
+            className="font-mono text-xs"
+          >
+            {busy === "cancel" ? "CANCELLING…" : "CANCEL DISPUTE"}
+          </Button>
+        )}
         {canTriggerEval && (
           <Button
             variant="secondary"
             disabled={busy === "trigger" || !contract}
             onClick={() => withBusyState("trigger", async () => {
               await contract!.triggerEvaluation(dispute.dispute_id);
+              markDisputeStatus("RANKED");
             })}
             className="font-mono text-xs"
           >
@@ -347,10 +398,37 @@ export default function DisputeDetailPage() {
             disabled={busy === "finalize" || !contract}
             onClick={() => withBusyState("finalize", async () => {
               await contract!.finalizeDispute(dispute.dispute_id);
+              markDisputeStatus(dispute.ranking_verdict === "RANKED_WINNER" ? "FINALIZED" : "INCONCLUSIVE");
             })}
             className="font-mono text-xs"
           >
             {busy === "finalize" ? "FINALIZING…" : "FINALIZE (CLOSE CHALLENGE WINDOW)"}
+          </Button>
+        )}
+        {canSingleFilerRefund && (
+          <Button
+            variant="secondary"
+            disabled={busy === "single-refund" || !contract}
+            onClick={() => withBusyState("single-refund", async () => {
+              await contract!.claimSingleFilerRefund(dispute.dispute_id);
+              markSingleFilerRefundPending();
+            })}
+            className="font-mono text-xs"
+          >
+            {busy === "single-refund" ? "PROCESSING REFUND…" : "CLAIM SINGLE-FILER REFUND"}
+          </Button>
+        )}
+        {canTimeout && (
+          <Button
+            variant="secondary"
+            disabled={busy === "timeout" || !contract}
+            onClick={() => withBusyState("timeout", async () => {
+              await contract!.claimDisputeTimeout(dispute.dispute_id);
+              markSingleFilerRefundPending();
+            })}
+            className="font-mono text-xs"
+          >
+            {busy === "timeout" ? "PROCESSING TIMEOUT…" : "CLAIM TIMEOUT REFUND"}
           </Button>
         )}
       </section>

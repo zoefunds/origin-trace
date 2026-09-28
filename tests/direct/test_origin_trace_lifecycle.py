@@ -439,7 +439,7 @@ def test_challenge_evidence_only_own_claim_and_only_in_window(
         {
             "status": 200,
             "body": json.dumps(
-                {"archived_snapshots": {"closest": {"available": True, "timestamp": "20180101000000", "status": "200"}}}
+                {"archived_snapshots": {"closest": {"available": True, "timestamp": "20180101000000", "status": "200", "url": "https://alice.example.com/post"}}}
             ),
         },
     )
@@ -510,5 +510,55 @@ def test_git_commit_provenance_deterministic_parse(direct_vm, direct_deploy, dir
     assert ca["timestamp_verified"] is True
     assert ca["estimated_earliest_ts"] == 1577836800  # 2020-01-01T00:00:00Z
 
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_unrelated_wayback_evidence_cannot_determine_winner(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """A provenance endpoint must identify the immutable artifact it dates."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(dispute_id, "https://alice.example.com/post", "WAYBACK")
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(
+        dispute_id,
+        "https://bob.example.com/post",
+        "WAYBACK",
+        "https://archive.example.org/lookup/bob",
+    )
+
+    mock_wayback(direct_vm, "alice.example.com", "20240601000000")
+    direct_vm.mock_web(
+        r"^https://archive\.example\.org/lookup/bob",
+        {
+            "status": 200,
+            "body": json.dumps({
+                "archived_snapshots": {
+                    "closest": {
+                        "available": True,
+                        "timestamp": "20100101000000",
+                        "status": "200",
+                        "url": "https://alice.example.com/post",
+                    }
+                }
+            }),
+        },
+    )
+    mock_artifact_page(direct_vm, "example.com", "Matching writeup.")
+    mock_match_score(direct_vm, 9000)
+
+    # This dispute uses the default 1-hour filing window.
+    warp_forward(direct_vm, 4000)
+    contract.trigger_evaluation(dispute_id)
+
+    cb = json.loads(contract.get_claim(claim_b))
+    assert cb["timestamp_verified"] is False
+    assert "not bound to the filed artifact" in cb["evaluation_notes"]
     d = json.loads(contract.get_dispute(dispute_id))
     assert d["leading_claim_id"] == claim_a

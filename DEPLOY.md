@@ -9,13 +9,13 @@ entirely) — not a pending checklist.
 
 | Piece | Where | Address / URL |
 |---|---|---|
-| Contract | GenLayer StudioNet | `0xda68997ac7D581aa0C280e0547cCf5375935c710` |
-| Backend | Fly.io app `origin-trace-backend`, region `iad` | https://origin-trace-backend.fly.dev |
-| Backend DB | Fly Postgres cluster `origin-trace-db` (attached) | internal only, via `DATABASE_URL` secret |
-| Backend cache | Upstash Redis | via `REDIS_URL` secret |
+| Contract | GenLayer StudioNet | `0x6B3321b0d92E614abC11dA7D241a8918879DcEe1` |
+| Backend | Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad` | https://origin-trace-backend-starlit-sound-5755.fly.dev |
+| Backend DB | Fly Postgres cluster attached to the app | internal only, via `DATABASE_URL` secret |
+| Backend cache | Fly Upstash Redis `origin-trace-cache` | via `REDIS_URL` secret |
 | Frontend | Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects` | https://origin-trace-wine.vercel.app |
 
-Confirmed working end-to-end: `fly logs -a origin-trace-backend` shows the
+Confirmed working end-to-end: `fly logs -a origin-trace-backend-starlit-sound-5755` shows the
 poller successfully calling `get_contract_info()` against the real
 contract and cycling cleanly (`[poller] cycle complete: N total disputes,
 M active re-synced, K had claim changes worth fetching`); the frontend
@@ -41,13 +41,13 @@ you have a new `DEPLOYED_CONTRACT_ADDRESS`, wire it into both live services:
 ### Backend (Fly.io)
 
 ```bash
-fly secrets set -a origin-trace-backend CONTRACT_ADDRESS="0xYOUR_NEW_ADDRESS"
+fly secrets set -a origin-trace-backend-starlit-sound-5755 CONTRACT_ADDRESS="0xYOUR_NEW_ADDRESS"
 ```
 
 Fly redeploys the machine automatically on secret change. Confirm:
 
 ```bash
-fly logs -a origin-trace-backend
+fly logs -a origin-trace-backend-starlit-sound-5755
 ```
 
 You should see `[poller] cycle complete: ...` lines, not a `CONTRACT_ADDRESS
@@ -79,7 +79,7 @@ CONTRACT_ADDRESS=0xYOUR_NEW_ADDRESS               # backend/.env
    A** (or **B**) on the file-claim form, then submit — repeat from a third
    wallet with the other sample if you want a genuine two-claim race.
 4. Confirm the backend picked it up:
-   `curl https://origin-trace-backend.fly.dev/api/disputes`
+  `curl https://origin-trace-backend-starlit-sound-5755.fly.dev/api/disputes`
 5. Wait for the filing window to close (the autofill sample uses a 24h
    window — shorten it in `frontend/app/create/page.tsx`'s
    `FILING_WINDOW_OPTIONS` for faster local testing if needed), then click
@@ -111,7 +111,7 @@ vercel deploy --prod --yes --scope adebiyi2002gmailcoms-projects
 ## Ongoing costs
 
 - **Fly.io**: one always-on `shared-cpu-1x` / 512MB machine
-  (`origin-trace-backend`) plus one Postgres node (`origin-trace-db`, 1GB
+  (`origin-trace-backend-starlit-sound-5755`) plus one Postgres node (1GB
   volume, unmanaged flex — the user is responsible for its own ops/backups,
   per Fly's own warning at creation time). Both are configured to never
   scale to zero, per the "must never die" requirement — this means they
@@ -128,8 +128,8 @@ vercel deploy --prod --yes --scope adebiyi2002gmailcoms-projects
 ## Tearing it all down
 
 ```bash
-fly apps destroy origin-trace-backend
-fly apps destroy origin-trace-db
+fly apps destroy origin-trace-backend-starlit-sound-5755
+fly apps destroy origin-trace-backend-starlit-sound-5755-db
 vercel remove origin-trace --scope adebiyi2002gmailcoms-projects
 ```
 
