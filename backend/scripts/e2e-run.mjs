@@ -13,7 +13,7 @@ import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { readFileSync, writeFileSync } from "fs";
 
-export const CONTRACT = "0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7";
+export const CONTRACT = "0xAb31625932b8eff4705a8F5bEBF0a51e81343d15";
 export const ENDPOINT = "https://studio.genlayer.com/api";
 const chain = { ...studionet, rpcUrls: { default: { http: [ENDPOINT] } } };
 

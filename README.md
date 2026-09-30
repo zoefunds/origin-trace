@@ -21,17 +21,17 @@ withdrawable.
 |---|---|---|
 | Frontend | https://origin-trace-wine.vercel.app | Next.js on Vercel |
 | Backend API | https://origin-trace-backend-starlit-sound-5755.fly.dev | Always-on indexer on Fly.io |
-| Contract | [`0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7`](https://studio.genlayer.com) | GenLayer StudioNet |
+| Contract | [`0xAb31625932b8eff4705a8F5bEBF0a51e81343d15`](https://studio.genlayer.com) | GenLayer StudioNet |
 | Repository | https://github.com/zoefunds/origin-trace | This repo |
 
-**Verified live end-to-end** (2026-09-29, real GEN, real GitHub artifacts): a
-full dispute lifecycle ran to completion on the deployed contract —
-`dispute:2`, two competing `GIT_COMMIT` claims (`octocat/Hello-World` README
-and `octocat/Spoon-Knife` index.html, both real, independently-fetchable
-GitHub demo repos), independent validator evaluation, `RANKED_WINNER`,
-`finalize_dispute`, and a real `withdraw` that zeroed the 0.04 GEN stake
-pool to the winner. See `review2.md` for the full trace, including the real
-bug this run surfaced and fixed along the way.
+**Verified live end-to-end, multiple full lifecycles, all three provenance
+types:** `dispute:2` (`GIT_COMMIT`, two real GitHub repos) and `dispute:0`
+(`PLATFORM_PUBLISH`, a real Hacker News item) have each been filed,
+independently evaluated by real GenLayer validator consensus, ranked,
+finalized, and paid out via a real `withdraw` — see `review2.md` and
+`review3.md` for the full traces. `WAYBACK` has also been live-verified,
+including a live rejection of an attacker-supplied provenance endpoint,
+against a real, independently-fetchable RFC text.
 
 ## The core loop
 
@@ -64,14 +64,17 @@ about exactly what's enforced and where in the code it lives
   `PLATFORM_PUBLISH`) structured metadata from the hosting platform. Every
   source must bind to the artifact's canonical identity and match the
   SHA-256 digest of the fetched artifact before its timestamp is eligible.
-- **Deterministic timestamp and content binding.** `WAYBACK` and
-  `GIT_COMMIT` timestamps are parsed straight out of structured JSON API
-  responses — no LLM in that path at all — and the archived/file-at-commit
-  content is hashed against the artifact. Only `PLATFORM_PUBLISH` metadata
-  timestamp extraction goes through the model, and only gets a 6-hour
-  tolerance after URL and digest validation.
+- **Deterministic timestamp and content binding.** `WAYBACK`, `GIT_COMMIT`,
+  and `PLATFORM_PUBLISH` timestamps are all parsed straight out of
+  structured, third-party-operated JSON APIs — no LLM anywhere in any
+  timestamp-extraction path. `PLATFORM_PUBLISH` is scoped to Hacker News
+  items: the metadata endpoint is derived deterministically from
+  `artifact_url` (never claimant-supplied), and Hacker News' own `id`/`time`
+  fields are used directly. It still carries a 6-hour tolerance
+  (`PLATFORM_TIMESTAMP_TOLERANCE_SECONDS`) as a generous ceiling against
+  incidental clock skew, not as cover for model nondeterminism.
   See `_extract_wayback_timestamp`, `_extract_git_commit_timestamp`,
-  `_extract_platform_publish_timestamp`.
+  `_extract_platform_publish_timestamp`, `_hn_api_url`.
 - **Every validator independently re-fetches everything.** The leader
   fetches the artifact and its provenance source and produces a result;
   every validator re-fetches the *same* sources itself and re-derives its
@@ -111,15 +114,16 @@ about exactly what's enforced and where in the code it lives
 ## Repository layout
 
 ```
-contracts/origin_trace.py     GenLayer Intelligent Contract (Python, GenVM) — 1575 lines
-tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 25 tests
+contracts/origin_trace.py     GenLayer Intelligent Contract (Python, GenVM) — 1722 lines
+tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 29 tests
 frontend/                     Next.js 16 app (wallet connect, dispute UI, autofill test data)
 backend/                      Always-on indexer/API (Postgres + Redis-guarded GenLayer polling)
 backend/migrations/           Tracked, one-shot-applied Postgres migrations (see DEPLOY.md)
 backend/scripts/              Live-chain e2e scripts (genlayer-js, real signers, real artifacts)
 memory/MEMORY.md              Persistent project memory / decision log for future sessions
 DEPLOY.md                     Contract deployment + live-service wiring reference
-review.md, review2.md         Point-in-time remediation records for external review feedback
+review.md, review2.md,        Point-in-time remediation records for external review feedback
+review3.md
 ```
 
 ## Contract
@@ -128,7 +132,7 @@ review.md, review2.md         Point-in-time remediation records for external rev
 # use Python 3.12+ (see memory/MEMORY.md for why this matters)
 pip install -r requirements.txt
 genvm-lint check contracts/origin_trace.py     # 0 errors
-pytest tests/direct/ -v                        # 25 passed
+pytest tests/direct/ -v                        # 29 passed
 ```
 
 The direct-mode test suite (`tests/direct/test_origin_trace_lifecycle.py`)
@@ -140,12 +144,12 @@ matching one, access control on every write path (cancel/withdraw/challenge-
 own-claim-only), the single-filer and full-timeout refund paths, challenge-
 window timing enforcement, the deterministic `GIT_COMMIT` parse path, a
 real archive.org wrapped-snapshot-URL Wayback resolution, a `GIT_COMMIT`
-raw-URL regression guarding against a stray branch-name path segment, a
-`PLATFORM_PUBLISH` claim rejecting a claimant-controlled metadata endpoint
-hosted off the artifact's own domain, and a `GIT_COMMIT` claim proving the
-adapter fetches a file's raw content rather than GitHub's rendered blob-view
-HTML page for digest binding — see `review2.md` for the story behind that
-last group of five.
+raw-URL regression guarding against a stray branch-name path segment, the
+deterministic Hacker-News-derived `PLATFORM_PUBLISH` path (including
+rejecting a non-Hacker-News `artifact_url` at filing and a mismatched-item
+response), and a `GIT_COMMIT` claim proving the adapter fetches a file's
+raw content rather than GitHub's rendered blob-view HTML page for digest
+binding — see `review2.md` and `review3.md` for the stories behind these.
 
 Contract deployment is done by the project owner via the GenLayer CLI /
 Studio — see `DEPLOY.md` for the full checklist and how the address gets

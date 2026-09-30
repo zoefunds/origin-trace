@@ -159,17 +159,48 @@ export async function getStoredDispute(disputeId: string): Promise<DisputeRow | 
   return res.rows[0] ?? null;
 }
 
-const CLAIM_TERMINAL_STATUSES = ["WINNER", "LOSER", "REFUNDED"];
-
-/** claim_ids already stored whose status can never change again -- safe to
- * skip re-fetching forever, this is the single biggest lever for staying
- * under GenLayer's request budget once a protocol has any real activity. */
+/** claim_ids already stored that can never change again -- safe to skip
+ * re-fetching forever, this is the single biggest lever for staying under
+ * GenLayer's request budget once a protocol has any real activity.
+ *
+ * LOSER is truly immutable the instant it's set: withdraw() rejects a
+ * LOSER claim outright, so its stake_deposited field never moves again.
+ *
+ * WINNER and REFUNDED are NOT immediately terminal, even though the
+ * contract only ever sets claim.status to those values once (by
+ * finalize_dispute / claim_single_filer_refund / claim_dispute_timeout):
+ * the actual payout is a SEPARATE, later, pull-based withdraw() call that
+ * zeroes stake_deposited but leaves status unchanged. Treating status
+ * alone as "terminal" meant a winner's cached stake_deposited stayed
+ * stuck at its pre-withdrawal value forever once cached once, even after
+ * they'd actually withdrawn on-chain -- the API/frontend would keep
+ * showing an already-paid-out claim as still holding its stake. Only
+ * WINNER/REFUNDED rows whose cached stake_deposited is already '0' (i.e.
+ * we've already observed the withdrawal) are safe to stop re-fetching. */
 export async function getTerminalClaimIds(disputeId: string): Promise<Set<string>> {
-  const res = await pool.query("SELECT claim_id FROM claims WHERE dispute_id = $1 AND status = ANY($2)", [
-    disputeId,
-    CLAIM_TERMINAL_STATUSES,
-  ]);
+  const res = await pool.query(
+    `SELECT claim_id FROM claims
+     WHERE dispute_id = $1
+       AND (status = 'LOSER' OR (status IN ('WINNER', 'REFUNDED') AND stake_deposited = '0'))`,
+    [disputeId]
+  );
   return new Set(res.rows.map((r) => r.claim_id as string));
+}
+
+/** True when this dispute has a WINNER/REFUNDED claim that hasn't been
+ * withdrawn yet (stake_deposited still nonzero in our cache) -- used to
+ * keep an otherwise-terminal-status dispute in the active poll set until
+ * its payout is actually confirmed settled, not just ranked/refunded. */
+export async function hasUnsettledClaims(disputeId: string): Promise<boolean> {
+  const res = await pool.query(
+    `SELECT 1 FROM claims
+     WHERE dispute_id = $1
+       AND status IN ('WINNER', 'REFUNDED')
+       AND stake_deposited <> '0'
+     LIMIT 1`,
+    [disputeId]
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function getKnownDisputeCount(): Promise<number> {

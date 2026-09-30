@@ -9,23 +9,25 @@ entirely) — not a pending checklist.
 
 | Piece | Where | Address / URL |
 |---|---|---|
-| Contract | GenLayer StudioNet | `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7` |
+| Contract | GenLayer StudioNet | `0xAb31625932b8eff4705a8F5bEBF0a51e81343d15` |
 | Backend | Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad` | https://origin-trace-backend-starlit-sound-5755.fly.dev |
 | Backend DB | Fly Postgres cluster attached to the app | internal only, via `DATABASE_URL` secret |
 | Backend cache | Fly Upstash Redis `origin-trace-cache` | via `REDIS_URL` secret |
 | Frontend | Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects` | https://origin-trace-wine.vercel.app |
 
-Confirmed working end-to-end, twice over: `fly logs -a origin-trace-backend-starlit-sound-5755` shows the
+Confirmed working end-to-end, repeatedly: `fly logs -a origin-trace-backend-starlit-sound-5755` shows the
 poller successfully calling `get_contract_info()` against the real
 contract and cycling cleanly (`[poller] cycle complete: N total disputes,
 M active re-synced, K had claim changes worth fetching`); the frontend
 loads in a real browser with the design system rendering correctly and the
-Reown wallet modal opening with the full wallet list. Beyond that, a full
-dispute lifecycle has actually been run to completion against the live
-contract with real GEN — `create_dispute` → two `file_claim`s → independent
-validator `trigger_evaluation` → `RANKED_WINNER` → `finalize_dispute` →
+Reown wallet modal opening with the full wallet list. Beyond that, full
+dispute lifecycles have actually been run to completion against the live
+contract with real GEN, across all three provenance types —
+`create_dispute` → `file_claim`(s) → independent validator
+`trigger_evaluation` → `RANKED_WINNER` → `finalize_dispute` →
 `withdraw`, correctly reflected on both the backend API and the rendered
-frontend page at every step. See `review2.md` for the full trace.
+frontend page at every step. See `review2.md` (`GIT_COMMIT`) and
+`review3.md` (`PLATFORM_PUBLISH`) for the full traces.
 
 ## Redeploying the contract (if you ship a new version)
 

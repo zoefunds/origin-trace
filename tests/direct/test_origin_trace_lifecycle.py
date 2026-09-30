@@ -384,6 +384,77 @@ def test_dispute_timeout_refund_when_evaluation_never_triggered(
         assert c["stake_deposited"] == "0"
 
 
+def test_dispute_timeout_cannot_override_an_active_challenge_window(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """evaluation_timeout_ts is FIXED at dispute creation (filing_deadline +
+    14 days), set before anyone knows when evaluation will actually happen.
+    challenge_deadline_ts is set later, from ranked_ts + the dispute's own
+    (up to 14-day) challenge_window_seconds -- so for a dispute evaluated
+    even slightly after its filing window closes, with a long challenge
+    window, challenge_deadline_ts can fall AFTER evaluation_timeout_ts.
+    Without a check, claim_dispute_timeout would become callable by ANYONE
+    while a RANKED dispute's challenge window is still legitimately open,
+    forcing a blanket refund that erases a real RANKED_WINNER result --
+    the loser reclaiming a stake they should have lost. This test
+    constructs exactly that overlap and confirms the timeout path refuses
+    to fire until the challenge window itself has actually closed, at
+    which point finalize_dispute (the correct path) is what actually
+    settles it -- never a lost dispute made whole again."""
+    contract = direct_deploy(CONTRACT)
+    # Minimum filing window, MAXIMUM challenge window -- the combination
+    # that makes challenge_deadline_ts exceed evaluation_timeout_ts as soon
+    # as evaluation happens even slightly after the filing window closes.
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=60 * 60 * 24 * 14)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(dispute_id, "https://alice.example.com/post", "WAYBACK")
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    mock_wayback(direct_vm, "alice.example.com", "20200101000000")
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "alice.example.com", "Genuine writeup of the compression method.")
+    mock_artifact_page(direct_vm, "bob.example.com", "Genuine writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
+
+    warp_forward(direct_vm, 1000)  # past the 900s filing window
+    contract.trigger_evaluation(dispute_id)
+
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["status"] == "RANKED"
+    assert d["ranking_verdict"] == "RANKED_WINNER"
+    assert d["leading_claim_id"] == claim_a
+    # Confirm the overlap this test relies on actually exists.
+    assert int(d["challenge_deadline_ts"]) > int(d["evaluation_timeout_ts"])
+
+    # Warp to just past evaluation_timeout_ts -- but still inside the
+    # still-open challenge window.
+    now_before = int(json.loads(contract.get_dispute(dispute_id))["evaluation_timeout_ts"])
+    target = now_before + 10
+    # warp_forward takes a relative delta from "now"; fetch current chain
+    # time via get_current_time to compute the right jump.
+    current = contract.get_current_time()
+    warp_forward(direct_vm, target - current)
+
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["status"] == "RANKED"  # still ranked, challenge window still open
+    with direct_vm.expect_revert("Cannot override an active challenge window"):
+        contract.claim_dispute_timeout(dispute_id)
+
+    # The dispute is not stuck -- finalize_dispute (the correct path) is
+    # unaffected by this check and settles it normally once the challenge
+    # window actually closes.
+    current = contract.get_current_time()
+    warp_forward(direct_vm, int(d["challenge_deadline_ts"]) - current + 10)
+    contract.finalize_dispute(dispute_id)
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["status"] == "FINALIZED"
+    assert d["final_winner_claim_id"] == claim_a
+
+
 def test_only_claimant_can_withdraw_their_own_claim(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
     dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900)
@@ -416,7 +487,26 @@ def test_challenge_evidence_only_own_claim_and_only_in_window(
     direct_vm.value = STAKE
     claim_b = contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
 
-    mock_wayback(direct_vm, "alice.example.com", "20240601000000")
+    # Anchored, mutually-exclusive patterns for alice's primary query vs.
+    # her later challenge-evidence query (a real archive.org feature: an
+    # added &timestamp= hint to pin an earlier snapshot of the SAME
+    # artifact) -- both must be archive.org itself post-fix, so they can no
+    # longer be told apart by pointing at different hosts the way the
+    # pre-fix design did.
+    direct_vm.mock_web(
+        r"^https://archive\.org/wayback/available\?url=https://alice\.example\.com/post$",
+        {"status": 200, "body": json.dumps({
+            "url": "https://alice.example.com/post",
+            "archived_snapshots": {"closest": {"available": True, "timestamp": "20240601000000", "status": "200", "url": "https://alice.example.com/post"}},
+        })},
+    )
+    direct_vm.mock_web(
+        r"^https://archive\.org/wayback/available\?url=https://alice\.example\.com/post&timestamp=20180101000000$",
+        {"status": 200, "body": json.dumps({
+            "url": "https://alice.example.com/post",
+            "archived_snapshots": {"closest": {"available": True, "timestamp": "20180101000000", "status": "200", "url": "https://alice.example.com/post"}},
+        })},
+    )
     mock_wayback(direct_vm, "bob.example.com", "20240601030000")
     mock_artifact_page(direct_vm, "example.com", "Matching writeup.")
     mock_match_score(direct_vm, 9000)
@@ -429,22 +519,12 @@ def test_challenge_evidence_only_own_claim_and_only_in_window(
     with direct_vm.expect_revert("may submit evidence for their own claim"):
         contract.submit_challenge_evidence(claim_a, "https://archive.org/wayback/available?url=https://alice.example.com/post")
 
-    # Alice submits an earlier alternative archive snapshot for her own claim.
-    # This URL is fetched AS-IS by the contract's challenge-evidence path
-    # (it's used directly as the provenance query endpoint, not wrapped in
-    # the standard archive.org query format), so it's mocked directly here
-    # rather than through the mock_wayback() helper.
-    direct_vm.mock_web(
-        r"^https://extra-archive\.example\.org/lookup",
-        {
-            "status": 200,
-            "body": json.dumps(
-                {"archived_snapshots": {"closest": {"available": True, "timestamp": "20180101000000", "status": "200", "url": "https://alice.example.com/post"}}}
-            ),
-        },
-    )
+    # Alice submits a real archive.org query for her OWN artifact, pinning
+    # an earlier snapshot via the standard &timestamp= hint.
     direct_vm.sender = direct_alice
-    contract.submit_challenge_evidence(claim_a, "https://extra-archive.example.org/lookup")
+    contract.submit_challenge_evidence(
+        claim_a, "https://archive.org/wayback/available?url=https://alice.example.com/post&timestamp=20180101000000",
+    )
 
     warp_forward(direct_vm, 7300)
     contract.finalize_dispute(dispute_id)
@@ -517,7 +597,14 @@ def test_git_commit_provenance_deterministic_parse(direct_vm, direct_deploy, dir
 def test_unrelated_wayback_evidence_cannot_determine_winner(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):
-    """A provenance endpoint must identify the immutable artifact it dates."""
+    """A provenance endpoint must identify the immutable artifact it dates
+    -- even when the query itself is legitimately archive.org, queried for
+    bob's own artifact, if archive.org's (mocked, simulating a bug or
+    compromise) RESPONSE reports a snapshot bound to a DIFFERENT artifact
+    than the one bob pinned, it must still be rejected. This is the
+    response-body identity check (_same_artifact_identity on the returned
+    closest.url), a second, independent layer beneath the host-binding
+    check in _wayback_query_url."""
     contract = direct_deploy(CONTRACT)
     dispute_id = _create_dispute(direct_vm, contract, direct_alice)
 
@@ -530,23 +617,24 @@ def test_unrelated_wayback_evidence_cannot_determine_winner(
         dispute_id,
         "https://bob.example.com/post",
         "WAYBACK",
-        "https://archive.example.org/lookup/bob",
+        "https://archive.org/wayback/available?url=https://bob.example.com/post",
     )
 
     mock_wayback(direct_vm, "alice.example.com", "20240601000000")
     direct_vm.mock_web(
-        r"^https://archive\.example\.org/lookup/bob",
+        r"^https://archive\.org/wayback/available\?url=.*bob\.example\.com",
         {
             "status": 200,
             "body": json.dumps({
+                "url": "https://bob.example.com/post",
                 "archived_snapshots": {
                     "closest": {
                         "available": True,
                         "timestamp": "20100101000000",
                         "status": "200",
-                        "url": "https://alice.example.com/post",
+                        "url": "https://alice.example.com/post",  # WRONG artifact
                     }
-                }
+                },
             }),
         },
     )
@@ -560,6 +648,51 @@ def test_unrelated_wayback_evidence_cannot_determine_winner(
     cb = json.loads(contract.get_claim(claim_b))
     assert cb["timestamp_verified"] is False
     assert "not bound to the filed artifact" in cb["evaluation_notes"]
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_wayback_rejects_non_archive_org_provenance_hint_url(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """provenance_hint_url for WAYBACK must be the archive.org Availability
+    API queried for the exact pinned artifact -- never an arbitrary
+    claimant-chosen endpoint. Previously any host was used verbatim as the
+    query URL: every validator would independently re-fetch the SAME
+    attacker-controlled endpoint and all agree on whatever fabricated
+    archived_snapshots/closest JSON it returned, since "independently
+    re-fetching" only re-derives trust when the source itself is bound to
+    something authoritative -- consensus is neutral, but neutrally
+    wrong."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(dispute_id, "https://alice.example.com/post", "WAYBACK")
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(
+        dispute_id,
+        "https://bob.example.com/post",
+        "WAYBACK",
+        "https://attacker-controlled.example.net/fake-archive?url=https://bob.example.com/post",
+    )
+
+    mock_wayback(direct_vm, "alice.example.com", "20240601000000")
+    # Deliberately no mock for the attacker's endpoint at all -- if the
+    # adapter ever fetched it, this test would fail with an unmocked-web
+    # error instead of the expected rejection, so a regression that starts
+    # trusting an arbitrary host again is caught either way.
+    mock_artifact_page(direct_vm, "example.com", "Matching writeup.")
+    mock_match_score(direct_vm, 9000)
+
+    warp_forward(direct_vm, 4000)
+    contract.trigger_evaluation(dispute_id)
+
+    cb = json.loads(contract.get_claim(claim_b))
+    assert cb["timestamp_verified"] is False
+    assert "archive.org Availability API" in cb["evaluation_notes"]
     d = json.loads(contract.get_dispute(dispute_id))
     assert d["leading_claim_id"] == claim_a
 
@@ -770,51 +903,113 @@ def test_git_commit_rejects_non_blob_artifact_url(direct_vm, direct_deploy, dire
     assert "must be a github.com /blob/<branch>/<path> URL" in ca["evaluation_notes"]
 
 
-def test_platform_publish_rejects_claimant_controlled_metadata_endpoint(
+def test_platform_publish_rejects_non_hn_artifact_url_at_filing(direct_vm, direct_deploy, direct_alice):
+    """PLATFORM_PUBLISH's metadata endpoint is DERIVED from artifact_url,
+    never claimant-supplied -- there is no provenance_hint_url for this
+    type to trust or reject at evaluation time, so an unsupported
+    artifact_url must be rejected outright at file_claim, before any stake
+    is even accepted. This is what closes the "same host as the artifact
+    is not proof of platform authority" hole: a claimant can no longer
+    point at some other same-host page they control (a user page, a gist,
+    a wiki) and have it treated as the platform's own record, because
+    there is no longer any endpoint for them to choose at all."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    with direct_vm.expect_revert("Hacker News items"):
+        contract.file_claim(dispute_id, "https://alice-self-hosted-blog.example.com/post", "PLATFORM_PUBLISH")
+
+
+def test_platform_publish_hn_item_resolves_deterministically(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):
-    """provenance_hint_url for PLATFORM_PUBLISH must be hosted on the
-    artifact's own platform. An arbitrary claimant-controlled endpoint on a
-    different domain -- however well-formed its self-attested binding JSON
-    looks -- must never be accepted as "the hosting platform's own
-    reported metadata", or any claimant could self-attest any timestamp."""
+    """A real-shaped Hacker News item API response resolves the claim using
+    HN's OWN server-assigned `time` and `id` fields -- never a
+    self-declared binding document -- and requires no LLM call for the
+    timestamp at all (fully deterministic, like WAYBACK/GIT_COMMIT)."""
     contract = direct_deploy(CONTRACT)
     dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
 
     direct_vm.sender = direct_alice
     direct_vm.value = STAKE
     claim_a = contract.file_claim(
-        dispute_id,
-        "https://alice.example.com/post",
-        "PLATFORM_PUBLISH",
-        "https://attacker-controlled.example.net/fake-metadata",
+        dispute_id, "https://news.ycombinator.com/item?id=8863", "PLATFORM_PUBLISH",
+    )
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    direct_vm.mock_web(
+        r"^https://hacker-news\.firebaseio\.com/v0/item/8863\.json$",
+        {
+            "status": 200,
+            "body": json.dumps({
+                "id": 8863,
+                "time": 1577836800,  # 2020-01-01T00:00:00Z
+                "title": "Streaming rollup compression writeup",
+                "text": "Full writeup of the streaming rollup compression method with dictionaries.",
+                "type": "story",
+            }),
+        },
+    )
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Full writeup of the streaming rollup compression method with dictionaries.")
+    mock_match_score(direct_vm, 9000, "Matches the disputed idea closely")
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is True
+    assert ca["estimated_earliest_ts"] == 1577836800
+
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_platform_publish_rejects_hn_response_for_a_different_item(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """Identity binding must come from Hacker News' OWN reported `id` field
+    for the fetched item, never merely from having queried the right URL --
+    if the derived API endpoint's response describes a DIFFERENT item than
+    the one pinned (e.g. a caching bug, or the derivation logic
+    regressed), the claim must be rejected, not silently accepted because
+    the host matched."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(
+        dispute_id, "https://news.ycombinator.com/item?id=8863", "PLATFORM_PUBLISH",
     )
     direct_vm.sender = direct_bob
     direct_vm.value = STAKE
     contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
 
-    mock_artifact_page(direct_vm, "alice.example.com", "Writeup of the compression method.")
-    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
-    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
-    mock_match_score(direct_vm, 9000)
-
     direct_vm.mock_web(
-        r"^https://attacker-controlled\.example\.net/fake-metadata$",
+        r"^https://hacker-news\.firebaseio\.com/v0/item/8863\.json$",
         {
             "status": 200,
             "body": json.dumps({
-                "artifact_url": "https://alice.example.com/post",
-                "content_sha256": __import__("hashlib").sha256(
-                    b"Writeup of the compression method."
-                ).hexdigest(),
-                "timestamp_iso8601": "2010-01-01T00:00:00Z",
+                "id": 9999999,  # WRONG item
+                "time": 1577836800,
+                "title": "Unrelated",
+                "text": "Unrelated content.",
+                "type": "story",
             }),
         },
     )
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
 
     warp_forward(direct_vm, 1000)
     contract.trigger_evaluation(dispute_id)
 
     ca = json.loads(contract.get_claim(claim_a))
     assert ca["timestamp_verified"] is False
-    assert "artifact's own platform" in ca["evaluation_notes"]
+    assert "not bound to the filed artifact" in ca["evaluation_notes"]

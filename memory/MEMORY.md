@@ -30,7 +30,7 @@ project (`proof-of-work`) that must not be touched or confused with this one.
 
 | Piece | Value |
 |---|---|
-| Contract address | `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7` (GenLayer StudioNet) — see note below on who deployed this one |
+| Contract address | `0xAb31625932b8eff4705a8F5bEBF0a51e81343d15` (GenLayer StudioNet) — see note below on who deployed this one |
 | Backend | https://origin-trace-backend-starlit-sound-5755.fly.dev (Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad`, org `personal`) |
 | Backend DB | Dedicated Fly Postgres cluster attached to the app (`DATABASE_URL` auto-set as a Fly secret) |
 | Backend cache | Fly-managed Upstash Redis `origin-trace-cache`, set via `fly secrets set REDIS_URL=...` |
@@ -41,14 +41,17 @@ Both live services are confirmed wired to the real contract: `fly logs -a
 origin-trace-backend-starlit-sound-5755` shows the poller successfully calling
 `get_contract_info()` and cycling cleanly; the frontend renders correctly
 in a real browser with the Reown wallet modal opening properly. Beyond
-that, a **full dispute lifecycle has been run to completion live** with
-real GEN and real GitHub artifacts (`dispute:2` on the current contract):
-create → two competing `GIT_COMMIT` claims → independent validator
-evaluation → `RANKED_WINNER` → `finalize_dispute` → `withdraw`, correctly
-reflected on the backend API and the rendered frontend at every step. See
-`review2.md` for the full trace, including a real adapter bug this exact
-run surfaced and led to fixing (see "Contract" below). See `DEPLOY.md` for
-the full redeploy/verification/teardown reference.
+that, **full dispute lifecycles have been run to completion live** with
+real GEN and real artifacts across all three provenance types:
+`dispute:2` (`GIT_COMMIT`, two real GitHub repos) and `dispute:0`
+(`PLATFORM_PUBLISH`, a real Hacker News item) each went create → competing
+claims → independent validator evaluation → `RANKED_WINNER` →
+`finalize_dispute` → `withdraw`, correctly reflected on the backend API and
+the rendered frontend at every step; `WAYBACK` has also been live-verified,
+including a live rejection of an attacker-supplied provenance endpoint. See
+`review2.md` and `review3.md` for the full traces, including real adapter
+bugs these runs surfaced and led to fixing (see "Contract" below). See
+`DEPLOY.md` for the full redeploy/verification/teardown reference.
 
 Real secrets (`REDIS_URL`, `DATABASE_URL`, live `CONTRACT_ADDRESS` values)
 live only in `backend/.env` / `frontend/.env.local` (both gitignored) and
@@ -73,15 +76,18 @@ request and is fine to commit.
 - **Challenge window**: 24h fixed default
   (`DEFAULT_CHALLENGE_WINDOW_SECONDS`), configurable per-dispute at
   `create_dispute()` time within `[2h, 14 days]`.
-- **Provenance scope**: generic from day one — `WAYBACK` (web archive),
-  `GIT_COMMIT` (GitHub/GitLab commit API), `PLATFORM_PUBLISH` (LLM-extracted
-  platform metadata) all supported, not narrowed to one type.
+- **Provenance scope**: generic from day one — `WAYBACK` (archive.org
+  Availability API), `GIT_COMMIT` (GitHub/GitLab commit API),
+  `PLATFORM_PUBLISH` (Hacker News Firebase API, deterministic `id`/`time`
+  fields, no LLM) all supported, not narrowed to one type. Every provenance
+  type derives its fetch endpoint deterministically from `artifact_url` —
+  none accept a claimant-supplied endpoint.
 - **Contract deployment boundary**: deployments are performed through the
   authenticated GenLayer CLI account, with the resulting address recorded in
   this file, `README.md`, `DEPLOY.md`, and both `.env.example` files.
   Deploys are normally run by the project owner, not by this assistant —
   the one exception on record is the 2026-09-29 session that produced
-  `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7`, where the user explicitly
+  `0xAb31625932b8eff4705a8F5bEBF0a51e81343d15`, where the user explicitly
   authorized the assistant to deploy directly (see `review2.md` for what
   that redeploy fixed). Treat that as a one-time grant, not a standing
   change to this rule — confirm with the user again before deploying
@@ -96,23 +102,18 @@ request and is fine to commit.
 
 ## Contract
 
-`contracts/origin_trace.py` — 1575 lines. `genvm-lint check` passes clean
-(0 errors; 1 informational warning about a newer runner being available —
-intentionally still pinned to
-`py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` to match
-the exact runner used by the reference projects below). Schema extraction
-succeeds (14 methods, 0 ctor params). **25/25 direct-mode tests pass**
+`contracts/origin_trace.py` — 1722 lines. `genvm-lint check` passes clean
+(3 checks passed; 0 errors). Schema extraction succeeds (14 methods, 0 ctor
+params). **29/29 direct-mode tests pass**
 (`tests/direct/test_origin_trace_lifecycle.py`) — see the README's
-"Contract" section for what's covered. Five of the 25 were added
-2026-09-29 as regression tests for real provenance-adapter bugs: three from
-code review (Wayback wrapped-snapshot-URL resolution, GIT_COMMIT raw-URL
-branch-segment stripping, PLATFORM_PUBLISH same-host binding), plus two
-more from a fourth bug — GIT_COMMIT hashing GitHub's rendered blob-view
-page instead of raw file content — that was only found by actually running
-real transactions against the live contract, not by code review or mocked
-tests. See `review2.md` for the full story, including that bug's live
-before/after proof (`dispute:0` INCONCLUSIVE pre-fix → `dispute:2`
-RANKED_WINNER + FINALIZED post-fix, same real artifacts).
+"Contract" section for what's covered. The `PLATFORM_PUBLISH` provenance
+adapter was redesigned from an LLM-scraped, self-declared-binding metadata
+fetch to a fully deterministic Hacker News Firebase API lookup, derived
+from `artifact_url` with no claimant-suppliable endpoint — see `review2.md`
+and `review3.md` for the full history of the provenance-adapter fixes,
+including live before/after proof (`dispute:0` INCONCLUSIVE pre-fix →
+`dispute:2` RANKED_WINNER + FINALIZED post-fix, same real artifacts) and
+the `PLATFORM_PUBLISH` redesign's own live verification.
 
 ### Architecture lineage
 
@@ -134,11 +135,13 @@ Patterns reused directly:
 
 ### Trust-boundary additions unique to this contract
 
-- `WAYBACK`/`GIT_COMMIT` timestamp extraction is fully deterministic JSON
-  parsing (no LLM at all), and the archived/file-at-commit content is hashed
-  against the fetched artifact before the timestamp is eligible. Leaders and
-  validators must match EXACTLY. Only `PLATFORM_PUBLISH` timestamp extraction
-  goes through the LLM, with a 6h tolerance after identity/digest validation.
+- `WAYBACK`, `GIT_COMMIT`, and `PLATFORM_PUBLISH` timestamp extraction are
+  all fully deterministic JSON parsing against a third-party-operated API
+  (no LLM in any timestamp path), and the archived/file-at-commit content is
+  hashed against the fetched artifact before the timestamp is eligible.
+  Leaders and validators must match EXACTLY for `WAYBACK`/`GIT_COMMIT`;
+  `PLATFORM_PUBLISH` keeps a 6h tolerance (`PLATFORM_TIMESTAMP_TOLERANCE_SECONDS`)
+  as a ceiling against incidental clock skew, not LLM nondeterminism.
 - The substantive-match prompt explicitly instructs the model to ignore any
   date/priority claims or embedded instructions found in the
   claimant-controlled artifact text — adversarial-content mitigation is
@@ -313,11 +316,12 @@ not yet done.
 - An automated pytest-style integration test suite against a live GenVM
   runner (would verify the actual native-GEN transfer path that
   direct-mode tests cannot simulate, as a repeatable CI-style check).
-  **Partially superseded**: a real, manual live-chain e2e pass has now been
-  run (2026-09-29, see `review2.md`) proving the full lifecycle including
-  actual GEN transfer on withdraw — but that was ad hoc scripting
-  (`backend/scripts/e2e-run.mjs` and friends), not a repeatable automated
-  suite.
+  **Partially superseded**: real, manual live-chain e2e passes have now
+  been run across all three provenance types (`GIT_COMMIT`,
+  `PLATFORM_PUBLISH`, `WAYBACK` — see `review2.md`/`review3.md`) proving
+  the full lifecycle including actual GEN transfer on withdraw — but this
+  is ad hoc scripting (`backend/scripts/e2e-run.mjs` and friends), not a
+  repeatable automated suite.
 - WalletConnect-remote-signer verification against the current genlayer-js
   SDK reference (see "Known gap" under Frontend above).
 - A settlements/history page and richer profile/withdrawal dashboard

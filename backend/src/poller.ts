@@ -6,6 +6,7 @@ import {
   setKnownDisputeCount,
   getStoredDispute,
   getTerminalClaimIds,
+  hasUnsettledClaims,
   pool,
 } from "./db.js";
 import { getGenlayerBudgetRemaining } from "./redis.js";
@@ -33,12 +34,20 @@ import { getGenlayerBudgetRemaining } from "./redis.js";
  *    stored (a transition happened, meaning existing claims' fields may
  *    have just been populated/updated by evaluate/finalize). If neither
  *    changed since the last cycle, claims are skipped entirely that tick.
- *  - Within a claims refresh, any claim already stored with a TERMINAL
- *    status (WINNER / LOSER / REFUNDED) is never re-fetched again -- that
- *    status can only ever be set once, by finalize_dispute, and never
- *    changes afterward.
- *  - Terminal DISPUTES (FINALIZED / INCONCLUSIVE / CANCELLED / TIMED_OUT)
- *    drop out of the active-poll set entirely after one more sync.
+ *  - Within a claims refresh, a LOSER claim is never re-fetched again once
+ *    seen (withdraw() rejects it outright, so nothing about it can ever
+ *    change). A WINNER/REFUNDED claim's *status* is likewise set exactly
+ *    once, but its payout is a SEPARATE, later, pull-based withdraw() call
+ *    that zeroes stake_deposited without touching status -- so a
+ *    WINNER/REFUNDED claim keeps being re-fetched until our cached
+ *    stake_deposited actually reaches '0', not merely once its status is
+ *    set (see getTerminalClaimIds / hasUnsettledClaims in db.ts).
+ *  - A dispute with terminal STATUS (FINALIZED / INCONCLUSIVE / CANCELLED /
+ *    TIMED_OUT) still stays in the active-poll set for as long as it has
+ *    an unsettled WINNER/REFUNDED claim -- otherwise a payout nobody has
+ *    withdrawn yet would go stale forever the moment the dispute itself
+ *    drops out of polling. It only drops out once every claim in it is
+ *    fully settled (or was always LOSER/never-staked).
  *  - New disputes are discovered by walking dispute_id sequence numbers
  *    from get_contract_info().total_disputes, so no "list all disputes"
  *    contract call is needed at all.
@@ -115,7 +124,11 @@ async function syncDispute(disputeId: string): Promise<{ claimsFetched: boolean 
     // Brand-new dispute with nothing filed yet -- nothing to fetch.
     return { claimsFetched: false };
   }
-  if (!claimCountGrew && !statusChanged) {
+  // A dispute can be re-included in the poll loop (see pollOnce) purely
+  // because it still has an unsettled WINNER/REFUNDED claim, with its own
+  // status/claim_count already unchanged -- that case must still trigger a
+  // claims refresh, or the pending withdrawal would never be observed.
+  if (!claimCountGrew && !statusChanged && !(await hasUnsettledClaims(disputeId))) {
     // Nothing that could affect claim data has happened since last cycle.
     return { claimsFetched: false };
   }
@@ -144,9 +157,22 @@ async function pollOnce(): Promise<void> {
       await setKnownDisputeCount(totalDisputes);
     }
 
-    // Re-sync every dispute that is not yet in a terminal state.
+    // Re-sync every dispute that is not yet in a terminal state, PLUS any
+    // terminal-status dispute that still has a WINNER/REFUNDED claim
+    // nobody has withdrawn yet -- a dispute reaching FINALIZED/INCONCLUSIVE
+    // does not mean its payout has actually been claimed; pull-based
+    // withdraw() is a separate, later transaction the poller must keep
+    // checking for, or the cached stake_deposited value goes stale forever
+    // the moment the dispute itself is dropped from active polling.
     const { rows } = await pool.query<{ dispute_id: string; status: string }>(
-      "SELECT dispute_id, status FROM disputes WHERE status <> ALL($1)",
+      `SELECT d.dispute_id, d.status FROM disputes d
+       WHERE d.status <> ALL($1)
+          OR EXISTS (
+            SELECT 1 FROM claims c
+            WHERE c.dispute_id = d.dispute_id
+              AND c.status IN ('WINNER', 'REFUNDED')
+              AND c.stake_deposited <> '0'
+          )`,
       [Array.from(TERMINAL_STATUSES)]
     );
     let claimsFetchedCount = 0;

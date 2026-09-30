@@ -1,0 +1,7 @@
+{
+  "disputeId": "dispute:0",
+  "claimA": "claim:0",
+  "claimB": "claim:1",
+  "filing_window_s": 900,
+  "challenge_window_s": 7200
+}

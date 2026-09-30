@@ -50,7 +50,7 @@ import datetime
 import hashlib
 import json
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qs
 from dataclasses import dataclass
 from genlayer import *
 import genlayer.gl as gl
@@ -77,11 +77,16 @@ CLAIM_LOSER = "LOSER"
 CLAIM_REFUNDED = "REFUNDED"
 
 # --- supported provenance source types -----------------------------------
-# Deliberately generic at launch: any independently-verifiable timestamp
-# source is accepted, not narrowed to a single provider.
+# Three source categories, not narrowed to a single provider -- but within
+# each category, only a small, explicit set of known, structurally
+# authoritative APIs is trusted (api.github.com for GIT_COMMIT, archive.org
+# for WAYBACK's default query, hacker-news.firebaseio.com for
+# PLATFORM_PUBLISH), never an
+# arbitrary claimant-chosen host. "Generic" here means generic across
+# provenance CATEGORIES, not "any URL on any domain is trusted" within one.
 PROVENANCE_WAYBACK = "WAYBACK"                # web.archive.org snapshot timestamp
 PROVENANCE_GIT_COMMIT = "GIT_COMMIT"          # GitHub/GitLab commit API committer date
-PROVENANCE_PLATFORM_PUBLISH = "PLATFORM_PUBLISH"  # hosting platform's own reported publish metadata
+PROVENANCE_PLATFORM_PUBLISH = "PLATFORM_PUBLISH"  # a known platform's own server-assigned publish metadata (currently: Hacker News items)
 VALID_PROVENANCE_TYPES = (PROVENANCE_WAYBACK, PROVENANCE_GIT_COMMIT, PROVENANCE_PLATFORM_PUBLISH)
 
 # --- timing window bounds, expressed in seconds ---------------------------
@@ -122,11 +127,12 @@ MATCH_THRESHOLD_BPS = 6000
 # are a deliberate middle ground, mirrored from a sibling GenLayer contract
 # (WitnessWeave) that uses the same leader/validator re-derivation pattern.
 MATCH_SCORE_TOLERANCE_BPS = 1500
-# Deterministically-parsed timestamps (WAYBACK / GIT_COMMIT) must agree
-# EXACTLY between leader and validator — they are re-derived from the same
-# structured JSON API response, not LLM-guessed, so exact agreement is the
-# correct bar. Only PLATFORM_PUBLISH timestamps (LLM-extracted from
-# unstructured metadata) get a tolerance window.
+# Every provenance type's timestamp is deterministically parsed straight
+# out of a structured JSON API response now (no LLM anywhere in any
+# timestamp path) — leader and validator re-derive the identical value, so
+# in the honest case they always agree exactly. This tolerance exists as a
+# generous ceiling against transient cross-node clock/formatting skew, not
+# to paper over LLM sampling variance.
 PLATFORM_TIMESTAMP_TOLERANCE_SECONDS = 60 * 60 * 6  # 6h
 
 # --- structured error classification, so leader/validator disagreement is
@@ -360,9 +366,9 @@ def _fetch_text(url: str, max_chars: int) -> tuple:
 def _fetch_json(url: str) -> tuple:
     """Returns (parsed_dict_or_None, error_prefix_or_None). Used for the
     structured, deterministic-parse provenance sources (Wayback API,
-    git-host commit API) — these never go through the LLM at all, which is
-    what lets leader/validator equivalence on their timestamps be an EXACT
-    match rather than a fuzzy tolerance."""
+    git-host commit API, Hacker News item API) — these never go through
+    the LLM at all, which is what lets leader/validator equivalence on
+    their timestamps be an EXACT match rather than a fuzzy tolerance."""
     try:
         response = gl.nondet.web.get(url)
     except Exception as exc:
@@ -440,18 +446,36 @@ def _same_artifact_identity(left: str, right: str) -> bool:
     return bool(left and right and _canonical_artifact_identity(left) == _canonical_artifact_identity(right))
 
 
-def _same_host(left: str, right: str) -> bool:
-    """True when `left` is hosted on the same platform as `right` — either
-    the identical host, or a subdomain of it (e.g. api.example.com is a
-    valid metadata endpoint for a page on example.com). Used to stop a
-    claimant from pointing provenance at an endpoint they control on an
-    entirely different domain and having it treated as the hosting
-    platform's own record."""
-    lh = (urlsplit(str(left).strip()).hostname or "").lower().rstrip(".")
-    rh = (urlsplit(str(right).strip()).hostname or "").lower().rstrip(".")
-    if not lh or not rh:
-        return False
-    return lh == rh or lh.endswith("." + rh) or rh.endswith("." + lh)
+def _wayback_query_url(provenance_hint_url: str, artifact_url: str) -> str | None:
+    """Returns the archive.org Availability API URL to query, or None when
+    provenance_hint_url is set but does not point at archive.org's own
+    endpoint queried for this exact artifact.
+
+    Previously any provenance_hint_url was used verbatim as the query
+    endpoint — a claimant could point it at a server they fully control,
+    which would return whatever archived_snapshots/closest JSON they liked.
+    Every validator independently re-fetches that SAME claimant-chosen URL
+    and, having no way to tell it apart from a real archive.org response,
+    would all agree on the SAME fabricated identity/timestamp — independent
+    re-fetching only re-derives trust in the SOURCE if the source itself is
+    bound to something authoritative, which an arbitrary URL is not. This
+    is the same class of hole PLATFORM_PUBLISH had (see review3.md),
+    applied to WAYBACK: the endpoint must always be archive.org's own API,
+    never claimant-chosen. A provenance_hint_url is still accepted when it
+    IS archive.org's Availability endpoint queried for this same artifact
+    (e.g. with an added &timestamp=... to pin a specific snapshot date, a
+    real archive.org feature) — this is used both as the primary source and
+    for challenge-window additive evidence (an earlier snapshot of the SAME
+    artifact, still only ever from archive.org itself)."""
+    if not provenance_hint_url:
+        return f"https://archive.org/wayback/available?url={artifact_url}"
+    parts = urlsplit(provenance_hint_url)
+    if (parts.hostname or "").lower() != "archive.org" or parts.path != "/wayback/available":
+        return None
+    hinted_url = parse_qs(parts.query).get("url", [""])[0]
+    if not hinted_url or not _same_artifact_identity(hinted_url, artifact_url):
+        return None
+    return provenance_hint_url
 
 
 def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str, artifact_digest: str) -> tuple:
@@ -459,9 +483,12 @@ def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str, arti
     Internet Archive's Availability API for the artifact URL itself — this
     is a third-party record of when the artifact was archived, entirely
     outside the claimant's control."""
-    query_url = provenance_hint_url or (
-        f"https://archive.org/wayback/available?url={artifact_url}"
-    )
+    query_url = _wayback_query_url(provenance_hint_url, artifact_url)
+    if query_url is None:
+        return None, (
+            f"{ERROR_EXPECTED} wayback provenance_hint_url must be the archive.org Availability "
+            "API queried for this exact artifact"
+        )
     parsed, err = _fetch_json(query_url)
     if err:
         return None, err
@@ -582,68 +609,73 @@ def _extract_git_commit_timestamp(provenance_hint_url: str, artifact_url: str, a
         return None, f"{ERROR_EXTERNAL} Unexpected commit API shape: {exc}"
 
 
-def _extract_platform_publish_timestamp(provenance_text: str) -> tuple:
-    """(unix_ts_or_None, error_prefix_or_None). Unlike the two deterministic
-    parsers above, platform-reported publish metadata comes in wildly
-    inconsistent unstructured shapes (meta tags, JSON-LD, visible byline
-    text on the HOSTING PLATFORM'S OWN page — never the claimant's
-    artifact page itself), so extraction goes through the LLM. The prompt
-    is deliberately restricted to the independently-fetched provenance
-    page text only."""
-    if not provenance_text.strip():
-        return None, f"{ERROR_EXTERNAL} Provenance source page returned no readable content"
-    prompt = (
-        "You are extracting a publish/creation timestamp from a webpage's own "
-        "platform metadata (e.g. meta tags, JSON-LD, byline). This text comes "
-        "from the HOSTING PLATFORM's page about the content, not from any "
-        "party with an interest in the outcome. Extract the single most "
-        "authoritative publish or creation timestamp reported BY THE PLATFORM "
-        "itself.\n\n"
-        f"PAGE TEXT (truncated):\n{provenance_text[:MAX_PROVENANCE_FETCH_CHARS]}\n\n"
-        "Respond ONLY as strict JSON, no prose outside it: "
-        '{"found": <true|false>, "timestamp_iso8601": "<ISO 8601 string or empty>"}'
-    )
+def _hn_api_url(artifact_url: str) -> tuple:
+    """(api_url_or_None, item_id_or_None). Hacker News item pages
+    (https://news.ycombinator.com/item?id=<id>) are backed by a
+    well-documented, fully open, unauthenticated Firebase JSON API
+    (hacker-news.firebaseio.com) with no bot-blocking and no rate-limit
+    wall — verified directly before choosing this over Reddit, whose
+    equivalent public JSON API now 403s unauthenticated/automated
+    requests entirely, which would make every PLATFORM_PUBLISH claim
+    permanently unverifiable for GenVM's validators. The API URL is
+    DERIVED from artifact_url's own `id` query parameter, never
+    claimant-supplied: there is no separate "provenance_hint_url" for a
+    claimant to point at some other same-host page they happen to
+    control and have it mistaken for the platform's own authoritative
+    record. Returns (None, None) when artifact_url isn't a recognized HN
+    item URL."""
+    parts = urlsplit(str(artifact_url).strip())
+    host = (parts.hostname or "").lower()
+    if host != "news.ycombinator.com" or parts.path.rstrip("/") != "/item":
+        return None, None
+    item_id = parse_qs(parts.query).get("id", [""])[0]
+    if not item_id.isdigit():
+        return None, None
+    return f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json", item_id
+
+
+def _extract_platform_publish_timestamp(artifact_url: str) -> tuple:
+    """(unix_ts_or_None, content_or_None, error_prefix_or_None). Fully
+    deterministic — no LLM anywhere in this path, unlike the prior design's
+    LLM scrape of "wildly inconsistent" unstructured metadata. PLATFORM_PUBLISH
+    is intentionally scoped to a small, explicit set of platforms with a
+    known, structured, server-assigned metadata API — exactly the same
+    "narrow to one known-authoritative API shape" pattern GIT_COMMIT already
+    uses for api.github.com, rather than trying (and failing) to verify
+    "authoritative platform record" generically for an arbitrary claimant-
+    chosen same-host URL. Currently supports: Hacker News items.
+
+    Identity binding uses Hacker News' OWN reported `id` field for this
+    item — never a self-declared "this is the artifact you're looking for"
+    claim from an arbitrary endpoint, which costs an attacker nothing to
+    forge (the artifact's digest is public, so restating it proves
+    nothing). `content` is returned whenever the item itself was
+    successfully fetched, even if identity/timestamp validation below then
+    fails, so a claim that fails verification still gets an honest
+    substantive-match score rather than an artificially empty one."""
+    api_url, item_id = _hn_api_url(artifact_url)
+    if api_url is None:
+        return None, None, (
+            f"{ERROR_EXPECTED} platform_publish is currently supported only for Hacker News "
+            "items (https://news.ycombinator.com/item?id=<id>)"
+        )
+    parsed, err = _fetch_json(api_url)
+    if err:
+        return None, None, err
     try:
-        raw = gl.nondet.exec_prompt(prompt, response_format="json")
+        title = _coerce_str(parsed.get("title", ""))
+        text = _coerce_str(parsed.get("text", ""))
+        url_field = _coerce_str(parsed.get("url", ""))
+        content = "\n\n".join(part for part in (title, text, url_field) if part).strip()
+        returned_id = parsed.get("id")
+        if returned_id is None or str(int(returned_id)) != item_id:
+            return None, content, f"{ERROR_EXPECTED} Hacker News API response is not bound to the filed artifact"
+        created_time = parsed.get("time")
+        if created_time is None:
+            return None, content, f"{ERROR_EXTERNAL} Hacker News API response missing time"
+        return int(created_time), content, None
     except Exception as exc:
-        return None, f"{ERROR_LLM} exec_prompt failed: {exc}"
-    parsed = raw if isinstance(raw, dict) else _parse_json_object(str(raw))
-    if parsed is None:
-        return None, f"{ERROR_LLM} Model output was not parseable JSON"
-    if not _coerce_bool(parsed.get("found", False)):
-        return None, f"{ERROR_EXTERNAL} No publish timestamp found in platform metadata"
-    iso_val = _coerce_str(parsed.get("timestamp_iso8601", ""))
-    if not iso_val:
-        return None, f"{ERROR_LLM} Model reported found=true but returned no timestamp"
-    try:
-        return _parse_iso8601_to_unix(iso_val), None
-    except Exception:
-        return None, f"{ERROR_LLM} Model returned an unparseable timestamp"
-
-
-def _validate_platform_provenance_binding(
-    provenance_text: str, artifact_url: str, artifact_digest: str
-) -> str | None:
-    """Require platform metadata to cryptographically bind its timestamp to
-    the exact pinned artifact before the timestamp can enter ranking.
-
-    PLATFORM_PUBLISH is intentionally restricted to a JSON metadata endpoint;
-    an arbitrary HTML page or a page merely mentioning the artifact is not a
-    sufficient identity/content binding.
-    """
-    try:
-        parsed = provenance_text if isinstance(provenance_text, dict) else _parse_json_object(provenance_text)
-    except Exception:
-        parsed = None
-    if not isinstance(parsed, dict):
-        return f"{ERROR_EXPECTED} Platform provenance must return JSON binding metadata"
-    bound_url = _pick(parsed, "artifact_url", ("canonical_url", "url", "original_url"))
-    bound_digest = _pick(parsed, "content_sha256", ("sha256", "artifact_digest", "digest"))
-    if not _coerce_str(bound_url) or not _same_artifact_identity(_coerce_str(bound_url), artifact_url):
-        return f"{ERROR_EXPECTED} Platform provenance is not bound to the pinned artifact identity"
-    if _coerce_str(bound_digest).lower() != artifact_digest.lower():
-        return f"{ERROR_EXPECTED} Platform provenance content digest does not match the pinned artifact"
-    return None
+        return None, None, f"{ERROR_EXTERNAL} Unexpected Hacker News API shape: {exc}"
 
 
 def _score_substantive_match(idea_title: str, idea_description: str, artifact_text: str) -> tuple:
@@ -708,47 +740,76 @@ def _score_substantive_match(idea_title: str, idea_description: str, artifact_te
 
 def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapshot: dict) -> dict:
     """The full per-claim nondeterministic pipeline: fetch artifact,
-    fetch independent provenance, extract a timestamp (deterministically
-    when possible, via LLM only for PLATFORM_PUBLISH), score substantive
-    match. Returns a structured dict — this is the ONLY thing the nondet
-    step is allowed to produce; ranking/payout never happens in here."""
+    fetch independent provenance, extract a timestamp (fully deterministic
+    for every provenance type now — no LLM in any timestamp path), score
+    substantive match. Returns a structured dict — this is the ONLY thing
+    the nondet step is allowed to produce; ranking/payout never happens in
+    here."""
     artifact_url = claim_snapshot["artifact_url"]
     provenance_type = claim_snapshot["provenance_type"]
     provenance_hint_url = claim_snapshot["provenance_hint_url"]
     extra_evidence_urls = claim_snapshot.get("challenge_evidence", [])
 
-    # GIT_COMMIT claims pin IDENTITY via a GitHub blob-view URL (so the repo
-    # and file path can be parsed out of it) but the CONTENT fetched for
-    # match-scoring and digest binding must be the raw file at that URL's
-    # branch/path — see _github_blob_to_raw_url. Every other provenance type
-    # fetches artifact_url exactly as pinned.
-    fetch_url = artifact_url
-    if provenance_type == PROVENANCE_GIT_COMMIT:
-        raw_artifact_url = _github_blob_to_raw_url(artifact_url)
-        if raw_artifact_url is None:
+    timestamp_unix = None
+    timestamp_err = None
+
+    if provenance_type == PROVENANCE_PLATFORM_PUBLISH:
+        # PLATFORM_PUBLISH derives BOTH its content and its timestamp from a
+        # single platform-API call (see _extract_platform_publish_timestamp)
+        # rather than a separate generic artifact_url fetch — there is no
+        # claimant-suppliable "provenance_hint_url" for this type at all.
+        timestamp_unix, artifact_text, timestamp_err = _extract_platform_publish_timestamp(artifact_url)
+        if artifact_text is None:
             return {
                 "claim_id": claim_snapshot["claim_id"],
                 "timestamp_unix": None,
                 "timestamp_verified": False,
                 "match_score_bps": 0,
                 "notes": "",
-                "error": f"{ERROR_EXPECTED} git_commit artifact_url must be a github.com /blob/<branch>/<path> URL",
+                "error": timestamp_err,
                 "artifact_digest": "",
             }
-        fetch_url = raw_artifact_url
+        digest = _artifact_digest(artifact_text)
+    else:
+        # GIT_COMMIT claims pin IDENTITY via a GitHub blob-view URL (so the
+        # repo and file path can be parsed out of it) but the CONTENT
+        # fetched for match-scoring and digest binding must be the raw file
+        # at that URL's branch/path — see _github_blob_to_raw_url. WAYBACK
+        # fetches artifact_url exactly as pinned.
+        fetch_url = artifact_url
+        if provenance_type == PROVENANCE_GIT_COMMIT:
+            raw_artifact_url = _github_blob_to_raw_url(artifact_url)
+            if raw_artifact_url is None:
+                return {
+                    "claim_id": claim_snapshot["claim_id"],
+                    "timestamp_unix": None,
+                    "timestamp_verified": False,
+                    "match_score_bps": 0,
+                    "notes": "",
+                    "error": f"{ERROR_EXPECTED} git_commit artifact_url must be a github.com /blob/<branch>/<path> URL",
+                    "artifact_digest": "",
+                }
+            fetch_url = raw_artifact_url
 
-    artifact_text, artifact_err = _fetch_text(fetch_url, MAX_ARTIFACT_FETCH_CHARS)
-    digest = "" if artifact_err else _artifact_digest(artifact_text)
-    if artifact_err:
-        return {
-            "claim_id": claim_snapshot["claim_id"],
-            "timestamp_unix": None,
-            "timestamp_verified": False,
-            "match_score_bps": 0,
-            "notes": "",
-            "error": artifact_err,
-            "artifact_digest": digest,
-        }
+        artifact_text, artifact_err = _fetch_text(fetch_url, MAX_ARTIFACT_FETCH_CHARS)
+        digest = "" if artifact_err else _artifact_digest(artifact_text)
+        if artifact_err:
+            return {
+                "claim_id": claim_snapshot["claim_id"],
+                "timestamp_unix": None,
+                "timestamp_verified": False,
+                "match_score_bps": 0,
+                "notes": "",
+                "error": artifact_err,
+                "artifact_digest": digest,
+            }
+
+        if provenance_type == PROVENANCE_WAYBACK:
+            timestamp_unix, timestamp_err = _extract_wayback_timestamp(provenance_hint_url, artifact_url, digest)
+        elif provenance_type == PROVENANCE_GIT_COMMIT:
+            timestamp_unix, timestamp_err = _extract_git_commit_timestamp(provenance_hint_url, artifact_url, digest)
+        else:
+            timestamp_err = f"{ERROR_EXPECTED} Unknown provenance_type"
 
     match_score_bps, notes, match_err = _score_substantive_match(idea_title, idea_description, artifact_text)
     if match_err:
@@ -762,36 +823,15 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
             "artifact_digest": digest,
         }
 
-    timestamp_unix = None
-    timestamp_err = None
-    if provenance_type == PROVENANCE_WAYBACK:
-        timestamp_unix, timestamp_err = _extract_wayback_timestamp(provenance_hint_url, artifact_url, digest)
-    elif provenance_type == PROVENANCE_GIT_COMMIT:
-        timestamp_unix, timestamp_err = _extract_git_commit_timestamp(provenance_hint_url, artifact_url, digest)
-    elif provenance_type == PROVENANCE_PLATFORM_PUBLISH:
-        if not _same_host(provenance_hint_url, artifact_url):
-            timestamp_err = (
-                f"{ERROR_EXPECTED} platform_publish provenance_hint_url must be hosted on "
-                "the artifact's own platform, not an arbitrary claimant-supplied endpoint"
-            )
-        else:
-            prov_text, prov_fetch_err = _fetch_text(provenance_hint_url, MAX_PROVENANCE_FETCH_CHARS)
-            if prov_fetch_err:
-                timestamp_err = prov_fetch_err
-            else:
-                timestamp_err = _validate_platform_provenance_binding(prov_text, artifact_url, digest)
-                if timestamp_err is None:
-                    timestamp_unix, timestamp_err = _extract_platform_publish_timestamp(prov_text)
-    else:
-        timestamp_err = f"{ERROR_EXPECTED} Unknown provenance_type"
-
     # Additive challenge-window evidence: if the primary provenance source
     # failed or is later than an alternative independent source the
     # claimant points at, try each extra URL the SAME way (by provenance
     # type) and keep the EARLIEST successfully-verified timestamp across
     # all of them. This never lets a claimant swap out their pinned
     # artifact — it only ever adds alternative THIRD-PARTY provenance for
-    # the same fixed artifact_url.
+    # the same fixed artifact_url. PLATFORM_PUBLISH has no claimant-suppliable
+    # endpoint to begin with (its API URL is derived, not chosen), so there
+    # is no meaningful additional evidence to accept for it here.
     for extra_url in extra_evidence_urls[:MAX_CHALLENGE_EVIDENCE_PER_CLAIM]:
         alt_ts = None
         alt_err = None
@@ -799,12 +839,6 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
             alt_ts, alt_err = _extract_wayback_timestamp(extra_url, artifact_url, digest)
         elif provenance_type == PROVENANCE_GIT_COMMIT:
             alt_ts, alt_err = _extract_git_commit_timestamp(extra_url, artifact_url, digest)
-        elif _same_host(extra_url, artifact_url):
-            alt_text, alt_fetch_err = _fetch_text(extra_url, MAX_PROVENANCE_FETCH_CHARS)
-            if not alt_fetch_err:
-                alt_err = _validate_platform_provenance_binding(alt_text, artifact_url, digest)
-                if alt_err is None:
-                    alt_ts, alt_err = _extract_platform_publish_timestamp(alt_text)
         if alt_ts is not None and (timestamp_unix is None or alt_ts < timestamp_unix):
             timestamp_unix = alt_ts
             timestamp_err = None
@@ -832,11 +866,12 @@ def _run_dispute_evaluation(idea_title: str, idea_description: str, claim_snapsh
 
 def _results_agree(leader: dict, mine: dict) -> bool:
     """The substantive-outcome comparison gate — this is what makes
-    consensus mean something beyond "the JSON parsed". Deterministically
-    parsed timestamps (WAYBACK / GIT_COMMIT) must match EXACTLY, since
-    leader and validator both parsed the same structured JSON API
-    response with no LLM in the loop. Only match scores (always
-    LLM-derived) and PLATFORM_PUBLISH timestamps get a numeric tolerance."""
+    consensus mean something beyond "the JSON parsed". Every provenance
+    type's timestamp is deterministically parsed from a structured JSON API
+    response with no LLM in the loop, so leader and validator should match
+    EXACTLY in the honest case; only match scores (always LLM-derived) are
+    expected to vary and get a numeric tolerance — the timestamp tolerance
+    below exists only as a ceiling against incidental skew."""
     leader_results = leader.get("results", {}) or {}
     my_results = mine.get("results", {}) or {}
     all_ids = set(leader_results.keys()) | set(my_results.keys())
@@ -885,11 +920,10 @@ def _results_agree(leader: dict, mine: dict) -> bool:
             continue
         ts_ok = True
         if l_ts is not None and m_ts is not None:
-            # Best-effort: treat as PLATFORM_PUBLISH-tolerant unless both
-            # sides are far enough apart to indicate a real structured
-            # mismatch — deterministic parsers will produce IDENTICAL
-            # values here in the honest case, so this tolerance mainly
-            # protects the LLM-extracted PLATFORM_PUBLISH path.
+            # Every provenance type is fully deterministic now, so leader
+            # and validator produce IDENTICAL values in the honest case;
+            # this tolerance is a generous ceiling against incidental
+            # cross-node skew, not a cover for genuine nondeterminism.
             ts_ok = abs(int(l_ts) - int(m_ts)) <= PLATFORM_TIMESTAMP_TOLERANCE_SECONDS
         if not ts_ok:
             continue
@@ -1153,9 +1187,14 @@ class OriginTrace(gl.Contract):
         if provenance_type == PROVENANCE_GIT_COMMIT:
             _require(provenance_hint_url != "", f"{ERROR_EXPECTED} git_commit claims require provenance_hint_url (a commit API URL)")
         if provenance_type == PROVENANCE_PLATFORM_PUBLISH:
+            # No provenance_hint_url for this type at all — see
+            # _extract_platform_publish_timestamp: the metadata API URL is
+            # derived from artifact_url, never claimant-chosen. Fail fast
+            # here rather than waiting until evaluation to reject an
+            # artifact_url that isn't a supported platform's post URL.
             _require(
-                provenance_hint_url != "",
-                f"{ERROR_EXPECTED} platform_publish claims require provenance_hint_url (a JSON metadata URL)",
+                _hn_api_url(artifact_url)[0] is not None,
+                f"{ERROR_EXPECTED} platform_publish is currently supported only for Hacker News items",
             )
         _require(gl.message.value == dispute.required_stake_wei, f"{ERROR_EXPECTED} Must stake exactly required_stake_wei")
 
@@ -1547,13 +1586,33 @@ class OriginTrace(gl.Contract):
         evaluation_timeout_ts, anyone may flip every still-staked claim to
         a full-refund state. This guarantees funds are never locked
         forever even if trigger_evaluation/finalize_dispute is never
-        called by anyone, or repeatedly fails to reach consensus."""
+        called by anyone, or repeatedly fails to reach consensus.
+
+        evaluation_timeout_ts is FIXED at dispute creation time
+        (filing_deadline + EVALUATION_TIMEOUT_SECONDS), before anyone
+        knows when evaluation will actually happen — for a dispute
+        evaluated late relative to its filing window, its (per-dispute
+        configurable, up to 14 days) challenge_deadline_ts can fall AFTER
+        evaluation_timeout_ts. Without an extra check, this timeout path
+        would become callable WHILE a RANKED dispute's challenge window is
+        still legitimately open, letting anyone force a blanket refund
+        that erases a real RANKED_WINNER result — the loser reclaiming a
+        stake they should have lost, instead of losing it. A RANKED
+        dispute must therefore ALSO wait for its own challenge window to
+        close before this recovery path applies; finalize_dispute (not
+        this) is always the correct, always-available path once that
+        window closes normally."""
         dispute = self._get_dispute_or_raise(dispute_id)
         _require(
             dispute.status in (STATUS_FILING_OPEN, STATUS_VALIDATING, STATUS_RANKED),
             f"{ERROR_EXPECTED} Dispute is not eligible for a timeout refund",
         )
         _require(self._now_ts() > dispute.evaluation_timeout_ts, f"{ERROR_EXPECTED} Evaluation timeout has not yet passed")
+        if dispute.status == STATUS_RANKED:
+            _require(
+                self._now_ts() > dispute.challenge_deadline_ts,
+                f"{ERROR_EXPECTED} Cannot override an active challenge window with a timeout refund",
+            )
 
         claim_ids = self._list_dispute_claim_ids(dispute_id, dispute.claim_count)
         for cid in claim_ids:
