@@ -562,3 +562,259 @@ def test_unrelated_wayback_evidence_cannot_determine_winner(
     assert "not bound to the filed artifact" in cb["evaluation_notes"]
     d = json.loads(contract.get_dispute(dispute_id))
     assert d["leading_claim_id"] == claim_a
+
+
+def test_wayback_real_wrapped_snapshot_url_resolves(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """The real archive.org Availability API reports closest.url as a
+    web.archive.org-WRAPPED replay URL (".../web/<ts>/<original>"), never
+    the bare original artifact URL. The adapter must extract the embedded
+    original for identity binding and fetch the raw ("id_") snapshot bytes
+    for the digest check -- comparing the wrapper host directly against the
+    artifact host, or digesting the toolbar-injected replay page, would
+    make every real-world snapshot unverifiable."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(dispute_id, "https://alice.example.com/post", "WAYBACK")
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    direct_vm.mock_web(
+        r"^https://archive\.org/wayback/available\?url=.*alice\.example\.com",
+        {
+            "status": 200,
+            "body": json.dumps({
+                "url": "https://alice.example.com/post",
+                "archived_snapshots": {
+                    "closest": {
+                        "available": True,
+                        "status": "200",
+                        "timestamp": "20200101000000",
+                        "url": "http://web.archive.org/web/20200101000000/https://alice.example.com/post",
+                    }
+                },
+            }),
+        },
+    )
+    direct_vm.mock_web(
+        r"^http://web\.archive\.org/web/20200101000000id_/https://alice\.example\.com/post$",
+        {"status": 200, "body": "Full writeup of the streaming rollup compression method with dictionaries."},
+    )
+    direct_vm.mock_web(
+        r"^https://alice\.example\.com/post$",
+        {"status": 200, "body": "Full writeup of the streaming rollup compression method with dictionaries."},
+    )
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Full writeup of the streaming rollup compression method with dictionaries.")
+    mock_match_score(direct_vm, 9000, "Matches the disputed idea closely")
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is True
+    assert ca["estimated_earliest_ts"] == 1577836800  # 2020-01-01T00:00:00Z
+
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_git_commit_raw_url_excludes_branch_segment(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """artifact_url's /blob/<branch>/<path> encodes the browse-time branch
+    name as its own path segment -- that branch segment must never leak
+    into the raw-content URL built from the commit sha, or the fetch lands
+    on a path that never existed at that commit."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(
+        dispute_id,
+        "https://github.com/alice/repo/blob/feature-branch/docs/readme.md",
+        "GIT_COMMIT",
+        "https://api.github.com/repos/alice/repo/commits/abc123",
+    )
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    mock_git_commit(direct_vm, r".*api\.github\.com.*", "2020-01-01T00:00:00Z")
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
+
+    # Deliberately no catch-all mock for github.com -- only the exact LIVE
+    # raw URL (branch + repo path, fetched for match-scoring/digest -- the
+    # blob URL itself is never fetched, see _github_blob_to_raw_url) and the
+    # exact, correctly-pinned COMMIT raw URL (commit sha + repo path, no
+    # "feature-branch/" segment) are registered, so a regression that
+    # reintroduces the branch segment into the commit-pinned URL fails the
+    # fetch instead of silently matching a broad pattern. (artifact_path is
+    # lowercased internally by the adapter, so the path here is already
+    # lowercase to match.)
+    direct_vm.mock_web(
+        r"^https://github\.com/alice/repo/raw/feature-branch/docs/readme\.md$",
+        {"status": 200, "body": "Writeup of the compression method."},
+    )
+    direct_vm.mock_web(
+        r"^https://github\.com/alice/repo/raw/abc123/docs/readme\.md$",
+        {"status": 200, "body": "Writeup of the compression method."},
+    )
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is True
+    assert ca["estimated_earliest_ts"] == 1577836800  # 2020-01-01T00:00:00Z
+
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_git_commit_fetches_raw_content_not_rendered_blob_page(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """artifact_url for a GIT_COMMIT claim is pinned as a GitHub
+    /blob/<branch>/<path> URL so the repo/path can be parsed out of it, but
+    that URL serves a full rendered HTML page, not the raw file -- fetching
+    it directly for match-scoring/digest binding can never byte-match the
+    raw content independently fetched at the pinned commit, so every such
+    claim would be permanently unverifiable. The adapter must instead fetch
+    the raw content at that same branch/path. Here the blob URL is mocked
+    with a DIFFERENT body (simulating GitHub's rendered page) that would
+    never match the commit's real raw content -- if the adapter fetched it
+    instead of the derived raw URL, this claim would wrongly fail."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(
+        dispute_id,
+        "https://github.com/alice/repo/blob/main/readme.md",
+        "GIT_COMMIT",
+        "https://api.github.com/repos/alice/repo/commits/abc123",
+    )
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    claim_b = contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    mock_git_commit(direct_vm, r".*api\.github\.com.*", "2020-01-01T00:00:00Z")
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
+
+    # The blob (rendered HTML page) URL -- deliberately different content
+    # from the raw file, so fetching this by mistake would digest-mismatch.
+    direct_vm.mock_web(
+        r"^https://github\.com/alice/repo/blob/main/readme\.md$",
+        {"status": 200, "body": "<html><body>rendered GitHub blob page chrome, not the raw file</body></html>"},
+    )
+    # The LIVE raw URL (branch + path) -- what the adapter must actually
+    # fetch for match-scoring/digest -- and the COMMIT-pinned raw URL,
+    # both serving the real plain-text content.
+    direct_vm.mock_web(
+        r"^https://github\.com/alice/repo/raw/main/readme\.md$",
+        {"status": 200, "body": "Writeup of the compression method."},
+    )
+    direct_vm.mock_web(
+        r"^https://github\.com/alice/repo/raw/abc123/readme\.md$",
+        {"status": 200, "body": "Writeup of the compression method."},
+    )
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is True
+    assert ca["estimated_earliest_ts"] == 1577836800  # 2020-01-01T00:00:00Z
+    d = json.loads(contract.get_dispute(dispute_id))
+    assert d["leading_claim_id"] == claim_a
+
+
+def test_git_commit_rejects_non_blob_artifact_url(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A GIT_COMMIT claim whose artifact_url isn't a recognized github.com
+    /blob/<branch>/<path> URL must be rejected outright -- there is no raw
+    content to derive, so it must never fall back to hashing whatever is
+    literally at that URL (which would reintroduce the rendered-page
+    mismatch this adapter exists to avoid)."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(
+        dispute_id,
+        "https://github.com/alice/repo",  # no /blob/<branch>/<path>
+        "GIT_COMMIT",
+        "https://api.github.com/repos/alice/repo/commits/abc123",
+    )
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is False
+    assert "must be a github.com /blob/<branch>/<path> URL" in ca["evaluation_notes"]
+
+
+def test_platform_publish_rejects_claimant_controlled_metadata_endpoint(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    """provenance_hint_url for PLATFORM_PUBLISH must be hosted on the
+    artifact's own platform. An arbitrary claimant-controlled endpoint on a
+    different domain -- however well-formed its self-attested binding JSON
+    looks -- must never be accepted as "the hosting platform's own
+    reported metadata", or any claimant could self-attest any timestamp."""
+    contract = direct_deploy(CONTRACT)
+    dispute_id = _create_dispute(direct_vm, contract, direct_alice, filing_seconds=900, challenge_seconds=7200)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = STAKE
+    claim_a = contract.file_claim(
+        dispute_id,
+        "https://alice.example.com/post",
+        "PLATFORM_PUBLISH",
+        "https://attacker-controlled.example.net/fake-metadata",
+    )
+    direct_vm.sender = direct_bob
+    direct_vm.value = STAKE
+    contract.file_claim(dispute_id, "https://bob.example.com/post", "WAYBACK")
+
+    mock_artifact_page(direct_vm, "alice.example.com", "Writeup of the compression method.")
+    mock_wayback(direct_vm, "bob.example.com", "20240601000000")
+    mock_artifact_page(direct_vm, "bob.example.com", "Writeup of the compression method.")
+    mock_match_score(direct_vm, 9000)
+
+    direct_vm.mock_web(
+        r"^https://attacker-controlled\.example\.net/fake-metadata$",
+        {
+            "status": 200,
+            "body": json.dumps({
+                "artifact_url": "https://alice.example.com/post",
+                "content_sha256": __import__("hashlib").sha256(
+                    b"Writeup of the compression method."
+                ).hexdigest(),
+                "timestamp_iso8601": "2010-01-01T00:00:00Z",
+            }),
+        },
+    )
+
+    warp_forward(direct_vm, 1000)
+    contract.trigger_evaluation(dispute_id)
+
+    ca = json.loads(contract.get_claim(claim_a))
+    assert ca["timestamp_verified"] is False
+    assert "artifact's own platform" in ca["evaluation_notes"]

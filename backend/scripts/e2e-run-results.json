@@ -1,0 +1,34 @@
+{
+  "test1": {
+    "disputeId": "dispute:0",
+    "claimA": "claim:0",
+    "claimB": "claim:1",
+    "filing_window_s": 900,
+    "challenge_window_s": 7200
+  },
+  "test2": {
+    "disputeId": "dispute:1",
+    "cancel_status": "ACCEPTED",
+    "final_status": {
+      "dispute_id": "dispute:1",
+      "creator": "0x8D4E752AE688C21eC7C7D4d8a232B5e0700DBf0f",
+      "idea_title": "Streaming dictionary compression for rollup batch data",
+      "idea_description": "A method for compressing rollup batch data using streaming dictionaries rebuilt incrementally over a rolling window of prior transactions, reducing L1 data-availability costs without a trusted setup.",
+      "status": "CANCELLED",
+      "required_stake_wei": "10000000000000000",
+      "stake_pool_deposited": "0",
+      "claim_count": 0,
+      "created_ts": 1790719792,
+      "filing_deadline_ts": 1790720692,
+      "evaluation_timeout_ts": 1791930292,
+      "leading_claim_id": "",
+      "ranking_verdict": "",
+      "ranking_rationale": "",
+      "ranked_ts": 0,
+      "challenge_deadline_ts": 7200,
+      "had_challenge_evidence": false,
+      "final_winner_claim_id": "",
+      "finalized_ts": 0
+    }
+  }
+}

@@ -440,6 +440,20 @@ def _same_artifact_identity(left: str, right: str) -> bool:
     return bool(left and right and _canonical_artifact_identity(left) == _canonical_artifact_identity(right))
 
 
+def _same_host(left: str, right: str) -> bool:
+    """True when `left` is hosted on the same platform as `right` — either
+    the identical host, or a subdomain of it (e.g. api.example.com is a
+    valid metadata endpoint for a page on example.com). Used to stop a
+    claimant from pointing provenance at an endpoint they control on an
+    entirely different domain and having it treated as the hosting
+    platform's own record."""
+    lh = (urlsplit(str(left).strip()).hostname or "").lower().rstrip(".")
+    rh = (urlsplit(str(right).strip()).hostname or "").lower().rstrip(".")
+    if not lh or not rh:
+        return False
+    return lh == rh or lh.endswith("." + rh) or rh.endswith("." + lh)
+
+
 def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str, artifact_digest: str) -> tuple:
     """(unix_ts_or_None, error_prefix_or_None). Independently queries the
     Internet Archive's Availability API for the artifact URL itself — this
@@ -457,18 +471,60 @@ def _extract_wayback_timestamp(provenance_hint_url: str, artifact_url: str, arti
         available = _coerce_bool(closest.get("available", False))
         if not available:
             return None, f"{ERROR_EXTERNAL} No archived snapshot found for this artifact"
-        archived_url = closest.get("url") or closest.get("original")
-        if not archived_url or not _same_artifact_identity(archived_url, artifact_url):
+        snapshot_url = closest.get("url") or closest.get("original")
+        ts_raw = closest.get("timestamp")
+        if not snapshot_url or not ts_raw:
+            return None, f"{ERROR_EXTERNAL} Archive record missing snapshot url/timestamp field"
+        ts_raw = str(ts_raw)
+        # A real archive.org snapshot URL WRAPS the original artifact URL as
+        # ".../web/<timestamp>/<original-url>" on the web.archive.org host —
+        # that wrapper host is never comparable to the artifact's own host,
+        # so identity must be checked against the embedded original URL, and
+        # content must be fetched via the "id_" raw modifier (otherwise
+        # Wayback serves a replay page with an injected toolbar that can
+        # never digest-match the original artifact bytes). A provenance
+        # source that already reports the plain original URL directly
+        # (no web.archive.org wrapper) is used as-is.
+        wrap_match = re.match(r"^https?://web\.archive\.org/web/\d+/(.+)$", snapshot_url)
+        if wrap_match:
+            original_url = wrap_match.group(1)
+            fetch_url = snapshot_url.replace(f"/web/{ts_raw}/", f"/web/{ts_raw}id_/", 1)
+        else:
+            original_url = snapshot_url
+            fetch_url = snapshot_url
+        if not _same_artifact_identity(original_url, artifact_url):
             return None, f"{ERROR_EXPECTED} Archive record is not bound to the filed artifact"
-        archived_text, archived_err = _fetch_text(archived_url, MAX_ARTIFACT_FETCH_CHARS)
+        archived_text, archived_err = _fetch_text(fetch_url, MAX_ARTIFACT_FETCH_CHARS)
         if archived_err or _artifact_digest(archived_text).lower() != artifact_digest.lower():
             return None, f"{ERROR_EXPECTED} Archive record content digest does not match the filed artifact"
-        ts_raw = closest.get("timestamp")
-        if not ts_raw:
-            return None, f"{ERROR_EXTERNAL} Archive record missing timestamp field"
-        return _parse_iso8601_to_unix(str(ts_raw)), None
+        return _parse_iso8601_to_unix(ts_raw), None
     except Exception as exc:
         return None, f"{ERROR_EXTERNAL} Unexpected archive API shape: {exc}"
+
+
+def _github_blob_to_raw_url(artifact_url: str) -> str | None:
+    """For GIT_COMMIT claims, artifact_url is pinned as a GitHub
+    /blob/<branch>/<path> URL so _extract_git_commit_timestamp can parse the
+    owning repo and file path out of it — but that blob URL serves GitHub's
+    full rendered HTML page for the file, never the raw bytes. The LIVE
+    content used for match-scoring and digest binding must instead be the
+    raw file at that same branch/path, or it can never byte-match the raw
+    content independently fetched at the pinned commit for comparison.
+    Returns None when artifact_url isn't a recognized github.com blob URL —
+    the claim is then rejected outright rather than silently hashing the
+    wrong thing."""
+    parts = urlsplit(str(artifact_url).strip())
+    if (parts.hostname or "").lower() != "github.com":
+        return None
+    if "/blob/" not in parts.path:
+        return None
+    repo, after_blob = parts.path.split("/blob/", 1)
+    if "/" not in after_blob:
+        return None
+    branch, suffix = after_blob.split("/", 1)
+    if not repo or not branch or not suffix:
+        return None
+    return f"https://github.com{repo}/raw/{branch}/{suffix}"
 
 
 def _extract_git_commit_timestamp(provenance_hint_url: str, artifact_url: str, artifact_digest: str) -> tuple:
@@ -490,8 +546,10 @@ def _extract_git_commit_timestamp(provenance_hint_url: str, artifact_url: str, a
         artifact_parts = urlsplit(artifact_url)
         api_path = api_parts.path.lower().split("/commits/", 1)[0].rstrip("/")
         artifact_path = artifact_parts.path.lower()
+        after_ref = ""
         if "/blob/" in artifact_path:
             artifact_repo = artifact_path.split("/blob/", 1)[0]
+            after_ref = artifact_path.split("/blob/", 1)[1]
         elif "/tree/" in artifact_path:
             artifact_repo = artifact_path.split("/tree/", 1)[0]
         else:
@@ -499,7 +557,11 @@ def _extract_git_commit_timestamp(provenance_hint_url: str, artifact_url: str, a
         if api_parts.hostname != "api.github.com" or api_path != "/repos" + artifact_repo:
             return None, f"{ERROR_EXPECTED} Commit record is not bound to the filed artifact repository"
         commit_sha = urlsplit(provenance_hint_url).path.rsplit("/", 1)[-1]
-        repo_suffix = artifact_path.split("/blob/", 1)[1] if "/blob/" in artifact_path else ""
+        # after_ref is "<branch>/<path/to/file>" — the leading segment is the
+        # browse-time ref/branch name, not part of the file's repo path, and
+        # must be dropped before building a raw URL pinned to commit_sha
+        # (keeping it produced a path that never existed at that commit).
+        repo_suffix = after_ref.split("/", 1)[1] if "/" in after_ref else ""
         if not repo_suffix or not commit_sha:
             return None, f"{ERROR_EXPECTED} Commit record is not bound to a versioned artifact path"
         raw_url = f"https://github.com{artifact_repo}/raw/{commit_sha}/{repo_suffix}"
@@ -655,7 +717,27 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
     provenance_hint_url = claim_snapshot["provenance_hint_url"]
     extra_evidence_urls = claim_snapshot.get("challenge_evidence", [])
 
-    artifact_text, artifact_err = _fetch_text(artifact_url, MAX_ARTIFACT_FETCH_CHARS)
+    # GIT_COMMIT claims pin IDENTITY via a GitHub blob-view URL (so the repo
+    # and file path can be parsed out of it) but the CONTENT fetched for
+    # match-scoring and digest binding must be the raw file at that URL's
+    # branch/path — see _github_blob_to_raw_url. Every other provenance type
+    # fetches artifact_url exactly as pinned.
+    fetch_url = artifact_url
+    if provenance_type == PROVENANCE_GIT_COMMIT:
+        raw_artifact_url = _github_blob_to_raw_url(artifact_url)
+        if raw_artifact_url is None:
+            return {
+                "claim_id": claim_snapshot["claim_id"],
+                "timestamp_unix": None,
+                "timestamp_verified": False,
+                "match_score_bps": 0,
+                "notes": "",
+                "error": f"{ERROR_EXPECTED} git_commit artifact_url must be a github.com /blob/<branch>/<path> URL",
+                "artifact_digest": "",
+            }
+        fetch_url = raw_artifact_url
+
+    artifact_text, artifact_err = _fetch_text(fetch_url, MAX_ARTIFACT_FETCH_CHARS)
     digest = "" if artifact_err else _artifact_digest(artifact_text)
     if artifact_err:
         return {
@@ -687,13 +769,19 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
     elif provenance_type == PROVENANCE_GIT_COMMIT:
         timestamp_unix, timestamp_err = _extract_git_commit_timestamp(provenance_hint_url, artifact_url, digest)
     elif provenance_type == PROVENANCE_PLATFORM_PUBLISH:
-        prov_text, prov_fetch_err = _fetch_text(provenance_hint_url, MAX_PROVENANCE_FETCH_CHARS)
-        if prov_fetch_err:
-            timestamp_err = prov_fetch_err
+        if not _same_host(provenance_hint_url, artifact_url):
+            timestamp_err = (
+                f"{ERROR_EXPECTED} platform_publish provenance_hint_url must be hosted on "
+                "the artifact's own platform, not an arbitrary claimant-supplied endpoint"
+            )
         else:
-            timestamp_err = _validate_platform_provenance_binding(prov_text, artifact_url, digest)
-            if timestamp_err is None:
-                timestamp_unix, timestamp_err = _extract_platform_publish_timestamp(prov_text)
+            prov_text, prov_fetch_err = _fetch_text(provenance_hint_url, MAX_PROVENANCE_FETCH_CHARS)
+            if prov_fetch_err:
+                timestamp_err = prov_fetch_err
+            else:
+                timestamp_err = _validate_platform_provenance_binding(prov_text, artifact_url, digest)
+                if timestamp_err is None:
+                    timestamp_unix, timestamp_err = _extract_platform_publish_timestamp(prov_text)
     else:
         timestamp_err = f"{ERROR_EXPECTED} Unknown provenance_type"
 
@@ -711,7 +799,7 @@ def _evaluate_single_claim(idea_title: str, idea_description: str, claim_snapsho
             alt_ts, alt_err = _extract_wayback_timestamp(extra_url, artifact_url, digest)
         elif provenance_type == PROVENANCE_GIT_COMMIT:
             alt_ts, alt_err = _extract_git_commit_timestamp(extra_url, artifact_url, digest)
-        else:
+        elif _same_host(extra_url, artifact_url):
             alt_text, alt_fetch_err = _fetch_text(extra_url, MAX_PROVENANCE_FETCH_CHARS)
             if not alt_fetch_err:
                 alt_err = _validate_platform_provenance_binding(alt_text, artifact_url, digest)

@@ -30,7 +30,7 @@ project (`proof-of-work`) that must not be touched or confused with this one.
 
 | Piece | Value |
 |---|---|
-| Contract address | `0x6B3321b0d92E614abC11dA7D241a8918879DcEe1` (GenLayer StudioNet, deployed by the user) |
+| Contract address | `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7` (GenLayer StudioNet) — see note below on who deployed this one |
 | Backend | https://origin-trace-backend-starlit-sound-5755.fly.dev (Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad`, org `personal`) |
 | Backend DB | Dedicated Fly Postgres cluster attached to the app (`DATABASE_URL` auto-set as a Fly secret) |
 | Backend cache | Fly-managed Upstash Redis `origin-trace-cache`, set via `fly secrets set REDIS_URL=...` |
@@ -40,8 +40,15 @@ project (`proof-of-work`) that must not be touched or confused with this one.
 Both live services are confirmed wired to the real contract: `fly logs -a
 origin-trace-backend-starlit-sound-5755` shows the poller successfully calling
 `get_contract_info()` and cycling cleanly; the frontend renders correctly
-in a real browser with the Reown wallet modal opening properly. See
-`DEPLOY.md` for the full redeploy/verification/teardown reference.
+in a real browser with the Reown wallet modal opening properly. Beyond
+that, a **full dispute lifecycle has been run to completion live** with
+real GEN and real GitHub artifacts (`dispute:2` on the current contract):
+create → two competing `GIT_COMMIT` claims → independent validator
+evaluation → `RANKED_WINNER` → `finalize_dispute` → `withdraw`, correctly
+reflected on the backend API and the rendered frontend at every step. See
+`review2.md` for the full trace, including a real adapter bug this exact
+run surfaced and led to fixing (see "Contract" below). See `DEPLOY.md` for
+the full redeploy/verification/teardown reference.
 
 Real secrets (`REDIS_URL`, `DATABASE_URL`, live `CONTRACT_ADDRESS` values)
 live only in `backend/.env` / `frontend/.env.local` (both gitignored) and
@@ -72,6 +79,13 @@ request and is fine to commit.
 - **Contract deployment boundary**: deployments are performed through the
   authenticated GenLayer CLI account, with the resulting address recorded in
   this file, `README.md`, `DEPLOY.md`, and both `.env.example` files.
+  Deploys are normally run by the project owner, not by this assistant —
+  the one exception on record is the 2026-09-29 session that produced
+  `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7`, where the user explicitly
+  authorized the assistant to deploy directly (see `review2.md` for what
+  that redeploy fixed). Treat that as a one-time grant, not a standing
+  change to this rule — confirm with the user again before deploying
+  without them next time.
 - **Frontend design system**: dark cryptographic-terminal aesthetic from
   `/Users/macbook/Documents/stitch_dark_theme_ui_design/DESIGN.md` —
   obsidian surfaces (`#090D14`/`#0D131F`/`#131B2B`/`#1B263B`), cyan primary
@@ -87,9 +101,18 @@ request and is fine to commit.
 intentionally still pinned to
 `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` to match
 the exact runner used by the reference projects below). Schema extraction
-succeeds (14 methods, 0 ctor params). **20/20 direct-mode tests pass**
+succeeds (14 methods, 0 ctor params). **25/25 direct-mode tests pass**
 (`tests/direct/test_origin_trace_lifecycle.py`) — see the README's
-"Contract" section for what's covered.
+"Contract" section for what's covered. Five of the 25 were added
+2026-09-29 as regression tests for real provenance-adapter bugs: three from
+code review (Wayback wrapped-snapshot-URL resolution, GIT_COMMIT raw-URL
+branch-segment stripping, PLATFORM_PUBLISH same-host binding), plus two
+more from a fourth bug — GIT_COMMIT hashing GitHub's rendered blob-view
+page instead of raw file content — that was only found by actually running
+real transactions against the live contract, not by code review or mocked
+tests. See `review2.md` for the full story, including that bug's live
+before/after proof (`dispute:0` INCONCLUSIVE pre-fix → `dispute:2`
+RANKED_WINNER + FINALIZED post-fix, same real artifacts).
 
 ### Architecture lineage
 
@@ -168,7 +191,7 @@ Pages: landing/live dispute feed, create-dispute form, dispute detail (file
 claim, trigger evaluation, submit challenge evidence, finalize, withdraw),
 profile (wallet-scoped disputes/claims). Both the create-dispute and
 file-claim forms have one-click "AUTOFILL SAMPLE" buttons using real,
-independently-fetchable test data (a 2011 GitHub commit for `GIT_COMMIT`
+independently-fetchable test data (a 2012 GitHub commit for `GIT_COMMIT`
 provenance, a Wikipedia page for `WAYBACK` provenance) so testing the
 earliest-wins ranking logic doesn't require hand-typing URLs.
 
@@ -182,6 +205,26 @@ not yet done.
 
 ## Known environment gotchas on this machine (macOS, pyenv-managed)
 
+- **`trigger_evaluation`/`finalize_dispute` on live StudioNet can genuinely
+  take anywhere from under a minute to 15-25+ minutes to reach a terminal
+  tx status.** These require all 5 validators to independently fetch every
+  claim's artifact + provenance source live and run an LLM judgment before
+  they can agree — this is real work, not a hang. Observed real outcomes
+  in the 2026-09-29 session: `MAJORITY_DISAGREE` (reverts cleanly, dispute
+  state unchanged, safe to retry immediately), `UNDETERMINED` (consensus
+  not reached, also reverts cleanly), and eventual `MAJORITY_AGREE`/
+  `FINALIZED` after 15+ minutes. **A `genlayer-js` write helper must check
+  the OVERALL tx status (`ACCEPTED`/`FINALIZED`) before treating a call as
+  successful — checking only `consensus_data.leader_receipt[0]` for
+  `execution_result: "SUCCESS"` and `result.status: "return"` is not
+  enough, since a lone leader can report success while the tx as a whole
+  is still `UNDETERMINED`/`COMMITTING`/`PROPOSING` and the state change has
+  NOT actually committed** (confirmed by reading dispute state directly
+  after such a "success").  Give write helpers a large retry budget
+  (minutes, not seconds) for any call that triggers evaluation, and don't
+  assume a transaction is stuck just because it's slow — check its
+  `statusName` via `client.getTransaction()` before redeploying or
+  retrying anything.
 - **Use `/Users/macbook/.pyenv/versions/3.12.7/bin/python3`** for all
   GenLayer tooling (`genvm-lint`, `pytest` with `gltest`). The default
   pyenv-selected interpreter is 3.11.9, which cannot import `genlayer_py`
@@ -267,8 +310,14 @@ not yet done.
 
 ## Still not done
 
-- Integration tests against a live GenVM runner (would verify the actual
-  native-GEN transfer path that direct-mode tests cannot simulate).
+- An automated pytest-style integration test suite against a live GenVM
+  runner (would verify the actual native-GEN transfer path that
+  direct-mode tests cannot simulate, as a repeatable CI-style check).
+  **Partially superseded**: a real, manual live-chain e2e pass has now been
+  run (2026-09-29, see `review2.md`) proving the full lifecycle including
+  actual GEN transfer on withdraw — but that was ad hoc scripting
+  (`backend/scripts/e2e-run.mjs` and friends), not a repeatable automated
+  suite.
 - WalletConnect-remote-signer verification against the current genlayer-js
   SDK reference (see "Known gap" under Frontend above).
 - A settlements/history page and richer profile/withdrawal dashboard
@@ -278,3 +327,14 @@ not yet done.
   permissive `cors()` with no origin allowlist — fine for early
   development, should be tightened before treating this as
   production-hardened).
+- **Resolved, but worth hardening further**: the backend DB's stale-row
+  collision on contract redeploy (see `review2.md`) is now fixed via a
+  tracked migration runner (`schema_migrations` table in
+  `backend/src/db.ts`) — each fresh redeploy just needs one new
+  `backend/migrations/00N_reset_*.sql` truncate file, applied automatically
+  and exactly once on the next `fly deploy` (see `DEPLOY.md`'s redeploy
+  checklist). This has now been used successfully on two separate
+  redeploys. The remaining, not-yet-done improvement: add a
+  `contract_address` column to `disputes`/`claims` so the indexer could
+  safely serve/cache more than one contract deployment's data at once,
+  without needing a reset migration every time.

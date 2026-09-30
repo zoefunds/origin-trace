@@ -26,13 +26,14 @@ const PROVENANCE_OPTIONS = [
 // deliberately two DIFFERENT provenance types and two genuinely different
 // eras, so a two-wallet test walks the earliest-wins ranking logic for
 // real rather than needing hand-typed URLs. Sample A pins to GitHub's own
-// canonical "first commit ever made through the API docs" example (2011,
-// deterministically parsed straight from the commit API's JSON — no LLM
-// involved in its timestamp at all). Sample B pins to a Wikipedia article
-// with a deep Wayback Machine history, deliberately later.
+// canonical "Hello-World" teaching-demo repository's first commit (real
+// committer date 2012-03-06T23:06:50Z, deterministically parsed straight
+// from the commit API's JSON — no LLM involved in its timestamp at all).
+// Sample B pins to a Wikipedia article with a deep Wayback Machine history,
+// deliberately later.
 const SAMPLE_CLAIMS = {
   A: {
-    label: "Sample A — GitHub commit (2011, earlier)",
+    label: "Sample A — GitHub commit (2012, earlier)",
     artifactUrl: "https://github.com/octocat/Hello-World/blob/master/README",
     provenanceType: "GIT_COMMIT",
     provenanceHintUrl: "https://api.github.com/repos/octocat/Hello-World/commits/7fd1a60b01f91b314f59955a4e4d4e80d8edf11",

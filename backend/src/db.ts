@@ -1,5 +1,5 @@
 import pg from "pg";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -12,10 +12,43 @@ if (!process.env.DATABASE_URL) {
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR = path.join(__dirname, "..", "migrations");
 
+// Applies every migrations/*.sql file exactly once, in filename order,
+// tracked in schema_migrations -- so a one-time data-reset migration (e.g.
+// after redeploying the contract to a fresh address, whose sequential
+// dispute/claim ids would otherwise collide with cached rows from the
+// previous deployment) runs on the next deploy and never re-runs on any
+// deploy after that, unlike re-executing 001_init.sql's CREATE-TABLE-IF-
+// NOT-EXISTS statements, which is safely idempotent by design.
 export async function runMigrations(): Promise<void> {
-  const sql = readFileSync(path.join(__dirname, "..", "migrations", "001_init.sql"), "utf-8");
-  await pool.query(sql);
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`
+  );
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  for (const file of files) {
+    const { rows } = await pool.query("SELECT 1 FROM schema_migrations WHERE filename = $1", [file]);
+    if (rows.length > 0) continue;
+    const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(sql);
+      await client.query("INSERT INTO schema_migrations (filename) VALUES ($1)", [file]);
+      await client.query("COMMIT");
+      console.log(`[db] applied migration ${file}`);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
   console.log("[db] migrations applied");
 }
 

@@ -9,23 +9,33 @@ entirely) — not a pending checklist.
 
 | Piece | Where | Address / URL |
 |---|---|---|
-| Contract | GenLayer StudioNet | `0x6B3321b0d92E614abC11dA7D241a8918879DcEe1` |
+| Contract | GenLayer StudioNet | `0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7` |
 | Backend | Fly.io app `origin-trace-backend-starlit-sound-5755`, region `iad` | https://origin-trace-backend-starlit-sound-5755.fly.dev |
 | Backend DB | Fly Postgres cluster attached to the app | internal only, via `DATABASE_URL` secret |
 | Backend cache | Fly Upstash Redis `origin-trace-cache` | via `REDIS_URL` secret |
 | Frontend | Vercel project `origin-trace`, scope `adebiyi2002gmailcoms-projects` | https://origin-trace-wine.vercel.app |
 
-Confirmed working end-to-end: `fly logs -a origin-trace-backend-starlit-sound-5755` shows the
+Confirmed working end-to-end, twice over: `fly logs -a origin-trace-backend-starlit-sound-5755` shows the
 poller successfully calling `get_contract_info()` against the real
 contract and cycling cleanly (`[poller] cycle complete: N total disputes,
 M active re-synced, K had claim changes worth fetching`); the frontend
 loads in a real browser with the design system rendering correctly and the
-Reown wallet modal opening with the full wallet list.
+Reown wallet modal opening with the full wallet list. Beyond that, a full
+dispute lifecycle has actually been run to completion against the live
+contract with real GEN — `create_dispute` → two `file_claim`s → independent
+validator `trigger_evaluation` → `RANKED_WINNER` → `finalize_dispute` →
+`withdraw`, correctly reflected on both the backend API and the rendered
+frontend page at every step. See `review2.md` for the full trace.
 
 ## Redeploying the contract (if you ship a new version)
 
-The contract is always deployed by the project owner, not by any tooling
-in this repo — that's a deliberate project rule, not a limitation.
+The contract is normally deployed by the project owner, not by any tooling
+in this repo — that's a deliberate default, not a hard limitation. (One
+documented exception: the 2026-09-29 session that produced the current
+address, where the user explicitly authorized the assistant to deploy
+directly — see `memory/MEMORY.md` and `review2.md`. Don't treat that as a
+standing change; confirm with the project owner before deploying without
+them again.)
 
 ```bash
 # from repo root, Python 3.12+ (see memory/MEMORY.md for why)
@@ -52,6 +62,27 @@ fly logs -a origin-trace-backend-starlit-sound-5755
 
 You should see `[poller] cycle complete: ...` lines, not a `CONTRACT_ADDRESS
 is not configured yet` error.
+
+**Also clear the indexer's cached rows from the previous contract.** The
+`disputes`/`claims` tables key rows by their on-chain id alone (`dispute:0`,
+`claim:0`, ...), which restarts from zero on every fresh deploy — without a
+reset, the new contract's real data collides with the old contract's stale
+cached rows under the same ids. Add a new, uniquely-named migration file
+(e.g. `backend/migrations/00N_reset_for_<reason>.sql`, following
+`002_reset_for_new_contract.sql`'s pattern):
+
+```sql
+TRUNCATE claims, disputes RESTART IDENTITY CASCADE;
+UPDATE sync_state SET known_dispute_count = 0, last_full_sync_at = NULL WHERE id = 1;
+```
+
+`runMigrations()` (`backend/src/db.ts`) tracks applied migrations in a
+`schema_migrations` table, so this runs exactly once on the next
+`fly deploy` and never re-truncates on any deploy after that — never edit
+an already-applied migration file, always add a new one. See `review2.md`
+for why this exists (a token-guarded HTTP reset endpoint was tried first
+and correctly rejected as a security regression) and confirmation that this
+approach has now been used successfully twice.
 
 ### Frontend (Vercel)
 

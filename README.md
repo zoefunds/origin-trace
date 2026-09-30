@@ -21,8 +21,17 @@ withdrawable.
 |---|---|---|
 | Frontend | https://origin-trace-wine.vercel.app | Next.js on Vercel |
 | Backend API | https://origin-trace-backend-starlit-sound-5755.fly.dev | Always-on indexer on Fly.io |
-| Contract | [`0x6B3321b0d92E614abC11dA7D241a8918879DcEe1`](https://studio.genlayer.com) | GenLayer StudioNet |
+| Contract | [`0x9289Fcb6e701a32EaeEd8f4D77Bc01f3920404D7`](https://studio.genlayer.com) | GenLayer StudioNet |
 | Repository | https://github.com/zoefunds/origin-trace | This repo |
+
+**Verified live end-to-end** (2026-09-29, real GEN, real GitHub artifacts): a
+full dispute lifecycle ran to completion on the deployed contract —
+`dispute:2`, two competing `GIT_COMMIT` claims (`octocat/Hello-World` README
+and `octocat/Spoon-Knife` index.html, both real, independently-fetchable
+GitHub demo repos), independent validator evaluation, `RANKED_WINNER`,
+`finalize_dispute`, and a real `withdraw` that zeroed the 0.04 GEN stake
+pool to the winner. See `review2.md` for the full trace, including the real
+bug this run surfaced and fixed along the way.
 
 ## The core loop
 
@@ -103,11 +112,14 @@ about exactly what's enforced and where in the code it lives
 
 ```
 contracts/origin_trace.py     GenLayer Intelligent Contract (Python, GenVM) — 1575 lines
-tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 20 tests
+tests/direct/                 Fast in-memory contract tests (mocked web/LLM) — 25 tests
 frontend/                     Next.js 16 app (wallet connect, dispute UI, autofill test data)
 backend/                      Always-on indexer/API (Postgres + Redis-guarded GenLayer polling)
+backend/migrations/           Tracked, one-shot-applied Postgres migrations (see DEPLOY.md)
+backend/scripts/              Live-chain e2e scripts (genlayer-js, real signers, real artifacts)
 memory/MEMORY.md              Persistent project memory / decision log for future sessions
 DEPLOY.md                     Contract deployment + live-service wiring reference
+review.md, review2.md         Point-in-time remediation records for external review feedback
 ```
 
 ## Contract
@@ -116,7 +128,7 @@ DEPLOY.md                     Contract deployment + live-service wiring referenc
 # use Python 3.12+ (see memory/MEMORY.md for why this matters)
 pip install -r requirements.txt
 genvm-lint check contracts/origin_trace.py     # 0 errors
-pytest tests/direct/ -v                        # 20 passed
+pytest tests/direct/ -v                        # 25 passed
 ```
 
 The direct-mode test suite (`tests/direct/test_origin_trace_lifecycle.py`)
@@ -126,7 +138,14 @@ timestamp resolving `INCONCLUSIVE`, unverifiable provenance resolving
 the outcome, a genuinely-earliest-but-non-matching claim losing to a later
 matching one, access control on every write path (cancel/withdraw/challenge-
 own-claim-only), the single-filer and full-timeout refund paths, challenge-
-window timing enforcement, and the deterministic `GIT_COMMIT` parse path.
+window timing enforcement, the deterministic `GIT_COMMIT` parse path, a
+real archive.org wrapped-snapshot-URL Wayback resolution, a `GIT_COMMIT`
+raw-URL regression guarding against a stray branch-name path segment, a
+`PLATFORM_PUBLISH` claim rejecting a claimant-controlled metadata endpoint
+hosted off the artifact's own domain, and a `GIT_COMMIT` claim proving the
+adapter fetches a file's raw content rather than GitHub's rendered blob-view
+HTML page for digest binding — see `review2.md` for the story behind that
+last group of five.
 
 Contract deployment is done by the project owner via the GenLayer CLI /
 Studio — see `DEPLOY.md` for the full checklist and how the address gets
@@ -154,7 +173,7 @@ finalize / withdraw (`/dispute/[id]`), and a wallet-scoped activity view
 **One-click test data.** Both the create-dispute form and the file-claim
 form have an "AUTOFILL SAMPLE" button. The claim form specifically offers
 two samples (A/B) that are real, independently-fetchable, and from
-genuinely different eras — a 2011 GitHub commit (`GIT_COMMIT` provenance,
+genuinely different eras — a 2012 GitHub commit (`GIT_COMMIT` provenance,
 deterministically parsed) and a Wikipedia page with deep Wayback history
 (`WAYBACK` provenance) — so testing the earliest-wins ranking logic with two
 wallets exercises real fetches against real data, not placeholder text.
